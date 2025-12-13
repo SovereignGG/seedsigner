@@ -10,8 +10,8 @@ from PIL import Image
 from PIL import ImageDraw
 from PIL import ImageFont
 
-from embit.src.embit.bip39 import mnemonic_to_bytes
-from embit.src.embit.bip39 import mnemonic_from_bytes
+from embit.bip39 import mnemonic_to_bytes
+from embit.bip39 import mnemonic_from_bytes
 
 #alphabet reference
 alphabet = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z"]
@@ -89,11 +89,11 @@ height = 240
 image = Image.new('RGB', (width, height))
 
 #initialize fonts
-myfont = ImageFont.truetype('/usr/share/fonts/truetype/msttcorefonts/Impact.ttf', 25)
-titlefont = ImageFont.truetype('/usr/share/fonts/truetype/msttcorefonts/Impact.ttf', 18)
-singleletterfont = ImageFont.truetype('/usr/share/fonts/truetype/msttcorefonts/Impact.ttf', 35)
-displayphrasefont = ImageFont.truetype('/usr/share/fonts/truetype/msttcorefonts/Impact.ttf', 23)
-finalwordfont = ImageFont.truetype('/usr/share/fonts/truetype/msttcorefonts/Impact.ttf', 50)
+myfont = ImageFont.truetype('impact.ttf', 25)
+titlefont = ImageFont.truetype('impact.ttf', 18)
+singleletterfont = ImageFont.truetype('impact.ttf', 35)
+displayphrasefont = ImageFont.truetype('impact.ttf', 23)
+finalwordfont = ImageFont.truetype('impact.ttf', 50)
 
 # Get drawing object to draw on image.
 draw = ImageDraw.Draw(image)
@@ -632,7 +632,7 @@ def main24wordprogram():
 
 def iotestmethod():
     #initialize fonts
-    iotestfont = ImageFont.truetype('/usr/share/fonts/truetype/msttcorefonts/Impact.ttf', 18)
+    iotestfont = ImageFont.truetype('impact.ttf', 18)
 
     # Get drawing object to draw on image.
     draw = ImageDraw.Draw(image)
@@ -706,8 +706,8 @@ def iotestmethod():
 ## MAIN MENU MODULE ## MAIN MENU MODULE ## MAIN MENU MODULE ## MAIN MENU MODULE ## MAIN MENU MODULE ##
 
 mainrunstate = 1
-mainmenufont = ImageFont.truetype('/usr/share/fonts/truetype/msttcorefonts/Impact.ttf', 20)
-versionfont = ImageFont.truetype('/usr/share/fonts/truetype/msttcorefonts/Impact.ttf', 16)
+mainmenufont = ImageFont.truetype('impact.ttf', 20)
+versionfont = ImageFont.truetype('impact.ttf', 16)
 
 def option1():
     draw.rectangle((0, 0, width, height), outline=0, fill=0)

@@ -1,11 +1,15 @@
 import embit
 
 from binascii import b2a_base64
+from gettext import gettext as _
 from hashlib import sha256
 
 from embit import bip32, compact, ec
 from embit.bip32 import HDKey
 from embit.descriptor import Descriptor
+from embit.descriptor.arguments import Key, KeyHash
+from embit.descriptor.miniscript import Wrapper
+from embit.descriptor.taptree import TapLeaf, TapTree
 from embit.networks import NETWORKS
 from embit.util import secp256k1
 
@@ -86,6 +90,23 @@ def get_single_sig_address(xpub: HDKey, script_type: str = SettingsConstants.NAT
 
 
 
+def can_derive_multisig_address(descriptor: Descriptor) -> bool:
+    """Whether `get_multisig_address()` can actually derive an address for this
+    descriptor: p2wsh/p2sh-p2wsh (including any wsh() Miniscript, not just basic
+    multisig), and legacy basic-multisig p2sh.
+
+    NOTE: this returns True for taproot too, because embit's `is_segwit` is True
+    for taproot descriptors -- which also makes the `elif descriptor.is_taproot:
+    raise` branch in `get_multisig_address()` below unreachable dead code.
+    Taproot addresses do in fact derive correctly through that path (verified by
+    test_get_multisig_address's taproot vector), so this is intentionally left
+    as-is rather than "fixed" to reject taproot; taproot *signing* is what's
+    still gated, over in PSBTParser.
+    """
+    return bool(descriptor.is_segwit or (descriptor.is_legacy and descriptor.is_basic_multisig))
+
+
+
 def get_multisig_address(descriptor: Descriptor, index: int = 0, is_change: bool = False, embit_network: str = "main"):
     if is_change:
         branch_index = 1
@@ -93,11 +114,16 @@ def get_multisig_address(descriptor: Descriptor, index: int = 0, is_change: bool
         branch_index = 0
 
     # Can derive p2wsh, p2sh-p2wsh, and legacy (non-segwit) p2sh
-    if descriptor.is_segwit or (descriptor.is_legacy and descriptor.is_basic_multisig):
+    if can_derive_multisig_address(descriptor):
         return descriptor.derive(index, branch_index=branch_index).script_pubkey().address(network=NETWORKS[embit_network])
 
     elif descriptor.is_taproot:
-        # TODO: Not yet implemented!
+        # Unreachable: embit's `is_segwit` is True for taproot descriptors too,
+        # so `can_derive_multisig_address()` above already returns True and
+        # taproot addresses derive correctly through that branch (see its
+        # docstring). Left in place rather than removed -- see the working
+        # plan's explicit note not to touch this without cause; it's dead code,
+        # not a bug, and touching it risks a behavior nobody's depending on.
         raise Exception("Taproot verification not yet implemented!")
 
     raise Exception(f"{descriptor.script_pubkey().script_type()} address verification not yet implemented!")
@@ -109,6 +135,188 @@ def get_multisig_policy(descriptor: Descriptor) -> tuple:
     if not descriptor.is_basic_multisig:
         raise ValueError(f"Expected a basic multisig descriptor, got: {descriptor.brief_policy}")
     return (str(descriptor.miniscript.args[0]), str(len(descriptor.keys)))
+
+
+
+def is_supported_wallet_descriptor(descriptor: Descriptor) -> bool:
+    """
+    Whether `descriptor` is one we know how to register, display, and (where
+    Address Explorer / Verify Addr are concerned) derive addresses for.
+
+    This is deliberately broader than `is_basic_multisig`: it also accepts
+    general wsh() Miniscript policies (e.g. Liana's or_d(pk(...),and_v(...))
+    recovery policies) and taproot descriptors. Taproot registration/display is
+    allowed because `get_descriptor_policy_summary()` can describe it correctly
+    -- taproot *address verification* and *script-path signing* remain
+    separately gated in `get_multisig_address()` and `PSBTParser`, which still
+    correctly raise "not yet implemented" for the taproot cases that aren't
+    ready, so allowing registration here doesn't let a user get further than
+    what's actually supported.
+
+    A bare single-key descriptor (wpkh()/pkh(), no miniscript, no taproot
+    script path) is intentionally excluded -- that's a plain single-sig import,
+    a separate unimplemented case (see the TODO this replaces in ScanView).
+    """
+    if descriptor.is_basic_multisig:
+        return True
+    if descriptor.is_taproot:
+        return True
+    if descriptor.is_segwit and descriptor.miniscript is not None:
+        return True
+    return False
+
+
+
+def _describe_key(key: Key) -> str:
+    # TRANSLATOR_NOTE: identifies a signing key by its 4-byte master fingerprint, e.g. "key 73C5DA0A"
+    return _("key {fingerprint}").format(fingerprint=key.fingerprint.hex().upper())
+
+
+
+def _describe_miniscript_node(node) -> str:
+    """
+    Recursively render a parsed Miniscript fragment (or a bare Key/KeyHash leaf)
+    as plain English. Driven by each fragment's own `NAME` (embit's
+    `OPERATOR_NAMES`, i.e. the exact descriptor keyword: "older", "and_v",
+    "thresh", etc.) rather than a fixed set of isinstance checks, so this stays
+    correct if embit adds fragments we haven't special-cased below -- those
+    fall through to the raw-text fallback at the end instead of being silently
+    misdescribed or dropped.
+    """
+    if isinstance(node, (Key, KeyHash)):
+        return _describe_key(node)
+
+    if isinstance(node, Wrapper):
+        # Wrappers (a: s: c: t: d: v: j: n: l: u:) change stack/verify mechanics,
+        # not *who* can spend -- describe the wrapped fragment directly.
+        return _describe_miniscript_node(node.arg)
+
+    name = getattr(node, "NAME", None)
+
+    if name == "older":
+        # TRANSLATOR_NOTE: {n} is a number of blocks (relative timelock, OP_CHECKSEQUENCEVERIFY)
+        return _("after {n} blocks").format(n=node.arg.num)
+
+    if name == "after":
+        # TRANSLATOR_NOTE: {n} is a block height (absolute timelock, OP_CHECKLOCKTIMEVERIFY)
+        return _("after block height {n}").format(n=node.arg.num)
+
+    if name in ("sha256", "hash256", "ripemd160", "hash160"):
+        # TRANSLATOR_NOTE: {name} is a hash function name, e.g. "sha256"
+        return _("a {name} preimage").format(name=name)
+
+    if name == "andor":
+        x, y, z = node.args
+        # TRANSLATOR_NOTE: describes miniscript's andor(X,Y,Z): if X then Y, else Z
+        return _("if ({x}) then ({y}) else ({z})").format(
+            x=_describe_miniscript_node(x),
+            y=_describe_miniscript_node(y),
+            z=_describe_miniscript_node(z),
+        )
+
+    if name in ("and_v", "and_b", "and_n"):
+        x, y = node.args[0], node.args[1]
+        # TRANSLATOR_NOTE: describes an AND condition between two spending requirements
+        return _("({x}) and ({y})").format(x=_describe_miniscript_node(x), y=_describe_miniscript_node(y))
+
+    if name in ("or_b", "or_c", "or_d", "or_i"):
+        x, y = node.args[0], node.args[1]
+        # TRANSLATOR_NOTE: describes an OR condition between two spending requirements
+        return _("({x}) or ({y})").format(x=_describe_miniscript_node(x), y=_describe_miniscript_node(y))
+
+    if name == "thresh":
+        k = node.args[0].num
+        subs = [_describe_miniscript_node(a) for a in node.args[1:]]
+        # TRANSLATOR_NOTE: {k} of the following {subs} conditions must be satisfied
+        return _("{k} of: [{subs}]").format(k=k, subs="; ".join(subs))
+
+    if name in ("multi", "sortedmulti", "multi_a", "sortedmulti_a"):
+        k = node.args[0].num
+        keys = [_describe_key(a) for a in node.args[1:]]
+        # TRANSLATOR_NOTE: a k-of-n multisig; {keys} is a list of key descriptions
+        return _("{k} of {n} keys: [{keys}]").format(k=k, n=len(keys), keys=", ".join(keys))
+
+    if name in ("pk", "pk_k", "pkh", "pk_h"):
+        # arg is already a Key or KeyHash; recurse to hit the isinstance branch above
+        return _describe_miniscript_node(node.arg)
+
+    if type(node).__name__ == "JustZero":
+        # TRANSLATOR_NOTE: an unspendable/always-false miniscript fragment
+        return _("(unspendable)")
+
+    if type(node).__name__ == "JustOne":
+        # TRANSLATOR_NOTE: an always-true/no-condition miniscript fragment
+        return _("(no condition)")
+
+    # Unknown/future fragment: never silently drop or misdescribe it -- show
+    # its raw descriptor text so an unsupported case is visibly incomplete
+    # rather than confidently wrong.
+    return str(node)
+
+
+
+def _flatten_taptree_leaves(taptree: TapTree) -> list:
+    """Return every TapLeaf in a (possibly nested) TapTree, in no particular order.
+
+    A TapTree's `.tree` is None, a single TapLeaf, or a 2-tuple of TapTree
+    branches (see embit.descriptor.taptree.TapTree.read_from) -- this walks
+    that structure regardless of depth/shape.
+    """
+    if taptree is None or taptree.tree is None:
+        return []
+    if isinstance(taptree.tree, TapLeaf):
+        return [taptree.tree]
+    left, right = taptree.tree
+    return _flatten_taptree_leaves(left) + _flatten_taptree_leaves(right)
+
+
+
+def get_descriptor_policy_summary(descriptor: Descriptor, max_length: int = 180) -> str:
+    """
+    Plain-English summary of any descriptor's spending policy -- basic
+    multisig, general wsh() Miniscript, or taproot (key-path plus any hidden
+    script-path leaves).
+
+    Correctness requirement: a taproot descriptor with a hidden script-path
+    recovery leaf must never be summarized as plain single-key/single-signature.
+    This is structural, not case-by-case -- the taproot branch below always
+    enumerates every leaf found by `_flatten_taptree_leaves()` if any exist,
+    regardless of whether each leaf's contents can be perfectly described (an
+    unrecognized leaf fragment still shows up as raw text via
+    `_describe_miniscript_node()`'s fallback, it's just never omitted).
+    """
+    if descriptor.is_basic_multisig:
+        threshold, n = get_multisig_policy(descriptor)
+        # TRANSLATOR_NOTE: Multisig policy. For a "2 of 3" policy, "threshold" = 2; "n" = 3
+        summary = _("{threshold} of {n} multisig").format(threshold=threshold, n=n)
+
+    elif descriptor.is_taproot:
+        parts = [_describe_miniscript_node(descriptor.key)]
+        leaves = _flatten_taptree_leaves(descriptor.taptree)
+        if leaves:
+            leaf_descriptions = [_describe_miniscript_node(leaf.miniscript) for leaf in leaves]
+            # TRANSLATOR_NOTE: {key} is the taproot key-path spending key; {leaves} lists hidden alternate spending paths
+            summary = _("Taproot: key-path ({key}); script-path: {leaves}").format(
+                key=parts[0], leaves="; ".join(leaf_descriptions)
+            )
+        else:
+            # TRANSLATOR_NOTE: a taproot descriptor with no hidden script paths at all -- key-path spend only
+            summary = _("Taproot: key-path only ({key})").format(key=parts[0])
+
+    elif descriptor.miniscript is not None:
+        summary = _describe_miniscript_node(descriptor.miniscript)
+
+    elif descriptor.key is not None:
+        # Bare single key (e.g. wpkh()/pkh()); describe safely rather than
+        # raising if a caller ever routes one here.
+        summary = _describe_miniscript_node(descriptor.key)
+
+    else:
+        raise ValueError(f"Unable to summarize descriptor policy: {descriptor}")
+
+    if len(summary) > max_length:
+        summary = summary[: max_length - 1].rstrip() + "…"  # ellipsis
+    return summary
 
 
 

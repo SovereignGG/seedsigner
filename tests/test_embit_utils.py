@@ -301,8 +301,15 @@ def test_get_multisig_address():
         ("sh(sortedmulti(2,[8d55ff0d/45h]tpubDANogJ2yfnizHwX7fSi5kUVzybyuPXDhgHB2TR9TUvkSLZFW73cRq4STKFDpx7qjJJiisyq82tbu4CeiYtmKEmT1xoCq9P8BPvXV31HUh6d/{0,1}/*,[0be174ee/45h]tpubDBkeVF2tDNT1Pz7L47iJeBB6RokU12LX6x4E6Ph8T89hmjQfB77q1AMyGwL8qpREVGq9sCJEbWwmnemwNTxnpxGn1di7BGy8jx9wEi5Vahu/{0,1}/*,[73c5da0a/45h]tpubDBKsGC1UqBDNvx9aivFmxZNgeZTUnmsCFGhWrqkLzucUCDePvbWWm3n8tAaAwMmxBG2ihdKCG9fzBdUnMxKx5PrkiqSZFi6Vkv6msUs9ddN/{0,1}/*))#p5t8sa8c", 0, False, "test"): "2NBXci43Y2fagvrFYTg3QmXj2LCPU2oaRFH",
         ("sh(sortedmulti(2,[8d55ff0d/45h]tpubDANogJ2yfnizHwX7fSi5kUVzybyuPXDhgHB2TR9TUvkSLZFW73cRq4STKFDpx7qjJJiisyq82tbu4CeiYtmKEmT1xoCq9P8BPvXV31HUh6d/{0,1}/*,[0be174ee/45h]tpubDBkeVF2tDNT1Pz7L47iJeBB6RokU12LX6x4E6Ph8T89hmjQfB77q1AMyGwL8qpREVGq9sCJEbWwmnemwNTxnpxGn1di7BGy8jx9wEi5Vahu/{0,1}/*,[73c5da0a/45h]tpubDBKsGC1UqBDNvx9aivFmxZNgeZTUnmsCFGhWrqkLzucUCDePvbWWm3n8tAaAwMmxBG2ihdKCG9fzBdUnMxKx5PrkiqSZFi6Vkv6msUs9ddN/{0,1}/*))#p5t8sa8c", 0, True, "test"): "2MuWQTq7hUGiX1HpXuPRnf7YTM42H5zoEwj",
 
-        # multisig taproot on testnet, not supported
-        # TODO: find what a multisig-taproot descriptor would look like and add a test so we can fall into the last condition exception.
+        # Taproot regression test (plan's explicit Phase 1 requirement): a
+        # key-path key plus a hidden script-path recovery leaf. Despite the
+        # `elif descriptor.is_taproot: raise` branch in get_multisig_address(),
+        # this actually succeeds -- embit's `is_segwit` is True for taproot too,
+        # so the p2wsh/p2tr branch above handles it, and the tweaked output key
+        # correctly commits to the hidden leaf. See can_derive_multisig_address's
+        # docstring: this is documented, not "fixed", per the working plan.
+        ("tr([73c5da0a/86h/1h/0h]tpubDFH9dgzveyD8zTbPUFuLrGmCydNvxehyNdUXKJAQN8x4aZ4j6UZqGfnqFrD4NqyaTVGKbvEW54tsvPTK2UoSbCC1PJY8iCNiwTL3RWZEheQ/{0,1}/*,and_v(v:pk([0be174ee/86h/1h/0h]tpubDEsePyLPkbxbrDiZSTTWdsviiNtiQjrvvzZnkLtG72QYLBygEsXePRsTdXi8DeMA7taCuuvoEBjUAfFrsNZeQJqfvG9fFoujYWbFPYUn7ux/{0,1}/*),older(1000)))#pmau4kv6", 0, False, "test"): "tb1plje4kx3zmjum85mm8rc5cdsughj4nl9jevt4fdt05cnlx9sqqxpq6nsps7",
+        ("tr([73c5da0a/86h/1h/0h]tpubDFH9dgzveyD8zTbPUFuLrGmCydNvxehyNdUXKJAQN8x4aZ4j6UZqGfnqFrD4NqyaTVGKbvEW54tsvPTK2UoSbCC1PJY8iCNiwTL3RWZEheQ/{0,1}/*,and_v(v:pk([0be174ee/86h/1h/0h]tpubDEsePyLPkbxbrDiZSTTWdsviiNtiQjrvvzZnkLtG72QYLBygEsXePRsTdXi8DeMA7taCuuvoEBjUAfFrsNZeQJqfvG9fFoujYWbFPYUn7ux/{0,1}/*),older(1000)))#pmau4kv6", 0, True, "test"): "tb1pv3fschyrnd89vca4yj7wymaxkuypjte3al5x8fmnjk693ewdelsszjj9u0",
 
         # some policy that is not supported:
         # TODO: find anything non supported so we can drop off the function: Would it be preferred to "else: raise ValueError()"?
@@ -372,6 +379,129 @@ def test_get_multisig_policy():
         embit_utils.get_multisig_policy(Descriptor.from_string(
             "wpkh([73c5da0a/84h/1h/0h]tpubDC5FSnBiZDMmhiuCmWAYsLwgLYrrT9rAqvTySfuCCrgsWz8wxMXUS9Tb9iVMvcRbvFcAHGkMD5Kx8koh4GquNGNTfohfk7pgjhaPCdXpoba/{0,1}/*)#2aj6cvca"
         ))
+
+
+#
+# Liana-style wsh() Miniscript and taproot test vectors, reusing the exact same
+# known-good keys/fingerprints as test_get_multisig_address above
+# (73c5da0a = 'abandon...about', 0be174ee = 'baby mass dust...casino')
+# so this test data is grounded in already-verified key material.
+#
+# wsh(or_d(pk(primary),and_v(v:pkh(recovery),older(1000)))) -- Liana's basic
+# 2-key recovery policy: primary key spends any time, recovery key can spend
+# alone after a 1000-block relative timelock.
+LIANA_WSH_DESCRIPTOR = (
+    "wsh(or_d(pk([73c5da0a/48h/1h/0h/2h]tpubDFH9dgzveyD8zTbPUFuLrGmCydNvxehyNdUXKJAQN8x4aZ4j6UZqGfnqFrD4NqyaTVGKbvEW54tsvPTK2UoSbCC1PJY8iCNiwTL3RWZEheQ/<0;1>/*),"
+    "and_v(v:pkh([0be174ee/48h/1h/0h/2h]tpubDEsePyLPkbxbrDiZSTTWdsviiNtiQjrvvzZnkLtG72QYLBygEsXePRsTdXi8DeMA7taCuuvoEBjUAfFrsNZeQJqfvG9fFoujYWbFPYUn7ux/<0;1>/*),older(1000))))"
+    "#73g7ls54"
+)
+
+# tr(primary, and_v(v:pk(recovery),older(1000))) -- same policy shape, taproot:
+# key-path spend by the primary key, a single hidden script-path recovery leaf.
+LIANA_TR_DESCRIPTOR = (
+    "tr([73c5da0a/86h/1h/0h]tpubDFH9dgzveyD8zTbPUFuLrGmCydNvxehyNdUXKJAQN8x4aZ4j6UZqGfnqFrD4NqyaTVGKbvEW54tsvPTK2UoSbCC1PJY8iCNiwTL3RWZEheQ/<0;1>/*,"
+    "and_v(v:pk([0be174ee/86h/1h/0h]tpubDEsePyLPkbxbrDiZSTTWdsviiNtiQjrvvzZnkLtG72QYLBygEsXePRsTdXi8DeMA7taCuuvoEBjUAfFrsNZeQJqfvG9fFoujYWbFPYUn7ux/<0;1>/*),older(1000)))"
+    "#uq7s6lsf"
+)
+
+# Bare single-key wpkh() -- NOT a "wallet policy" in the Miniscript/multisig
+# sense; should be excluded from is_supported_wallet_descriptor just like it
+# was before this change (routes to NotYetImplementedView).
+SINGLE_KEY_DESCRIPTOR = (
+    "wpkh([73c5da0a/84h/1h/0h]tpubDFH9dgzveyD8zTbPUFuLrGmCydNvxehyNdUXKJAQN8x4aZ4j6UZqGfnqFrD4NqyaTVGKbvEW54tsvPTK2UoSbCC1PJY8iCNiwTL3RWZEheQ/<0;1>/*)"
+    "#hxzwpz08"
+)
+
+
+def test_is_supported_wallet_descriptor():
+    """
+    tests seedsigner.helpers.embit_utils.is_supported_wallet_descriptor()
+    """
+    from embit.descriptor import Descriptor
+
+    # Existing basic multisig (unchanged behavior)
+    basic_multisig = Descriptor.from_string(
+        "wsh(sortedmulti(2,[8d55ff0d/48h/1h/0h/2h]tpubDDxNVWk924RTUhdkVB2uLHw1hGMPNMGufpZefhkkswjbZppVZcuMdjYKQN4ewUog9vbL6RBLFPRWcgTGT7kYP79N6thyJ43ELUs4N2szXMg/{0,1}/*,[73c5da0a/48h/1h/0h/2h]tpubDFH9dgzveyD8zTbPUFuLrGmCydNvxehyNdUXKJAQN8x4aZ4j6UZqGfnqFrD4NqyaTVGKbvEW54tsvPTK2UoSbCC1PJY8iCNiwTL3RWZEheQ/{0,1}/*,[0be174ee/48h/1h/0h/2h]tpubDEsePyLPkbxbrDiZSTTWdsviiNtiQjrvvzZnkLtG72QYLBygEsXePRsTdXi8DeMA7taCuuvoEBjUAfFrsNZeQJqfvG9fFoujYWbFPYUn7ux/{0,1}/*))#zw6cnrlk"
+    )
+    assert embit_utils.is_supported_wallet_descriptor(basic_multisig) is True
+
+    # New: general wsh() Miniscript (Liana-style)
+    assert embit_utils.is_supported_wallet_descriptor(Descriptor.from_string(LIANA_WSH_DESCRIPTOR)) is True
+
+    # New: taproot, with a hidden script-path leaf
+    assert embit_utils.is_supported_wallet_descriptor(Descriptor.from_string(LIANA_TR_DESCRIPTOR)) is True
+
+    # Bare single-key descriptor: still excluded (unimplemented single-sig import)
+    assert embit_utils.is_supported_wallet_descriptor(Descriptor.from_string(SINGLE_KEY_DESCRIPTOR)) is False
+
+
+def test_get_descriptor_policy_summary():
+    """
+    tests seedsigner.helpers.embit_utils.get_descriptor_policy_summary()
+    """
+    from embit.descriptor import Descriptor
+
+    # Basic multisig: unchanged output vs. the old get_multisig_policy()-based string
+    basic_multisig = Descriptor.from_string(
+        "wsh(sortedmulti(2,[8d55ff0d/48h/1h/0h/2h]tpubDDxNVWk924RTUhdkVB2uLHw1hGMPNMGufpZefhkkswjbZppVZcuMdjYKQN4ewUog9vbL6RBLFPRWcgTGT7kYP79N6thyJ43ELUs4N2szXMg/{0,1}/*,[73c5da0a/48h/1h/0h/2h]tpubDFH9dgzveyD8zTbPUFuLrGmCydNvxehyNdUXKJAQN8x4aZ4j6UZqGfnqFrD4NqyaTVGKbvEW54tsvPTK2UoSbCC1PJY8iCNiwTL3RWZEheQ/{0,1}/*,[0be174ee/48h/1h/0h/2h]tpubDEsePyLPkbxbrDiZSTTWdsviiNtiQjrvvzZnkLtG72QYLBygEsXePRsTdXi8DeMA7taCuuvoEBjUAfFrsNZeQJqfvG9fFoujYWbFPYUn7ux/{0,1}/*))#zw6cnrlk"
+    )
+    assert embit_utils.get_descriptor_policy_summary(basic_multisig) == "2 of 3 multisig"
+
+    # wsh() Miniscript: both spending paths must be mentioned, with the
+    # fingerprints and the timelock value visible
+    wsh_summary = embit_utils.get_descriptor_policy_summary(Descriptor.from_string(LIANA_WSH_DESCRIPTOR))
+    assert "73C5DA0A" in wsh_summary
+    assert "0BE174EE" in wsh_summary
+    assert "1000" in wsh_summary
+    assert "or" in wsh_summary
+
+    # Taproot regression test (the plan's explicit correctness requirement):
+    # a taproot descriptor with a hidden script-path recovery leaf must NEVER
+    # be summarized as plain single-key/single-signature. The key-path key and
+    # the recovery leaf's key + timelock must both show up.
+    tr_summary = embit_utils.get_descriptor_policy_summary(Descriptor.from_string(LIANA_TR_DESCRIPTOR))
+    assert "single" not in tr_summary.lower()
+    assert "73C5DA0A" in tr_summary  # key-path key
+    assert "0BE174EE" in tr_summary  # hidden recovery leaf key
+    assert "1000" in tr_summary      # recovery leaf's timelock
+
+    # Taproot with no script path at all (key-path only) -- also must not be
+    # mislabeled, but has nothing to hide, so no leaves are expected.
+    key_only_taproot = Descriptor.from_string(
+        "tr([73c5da0a/86h/1h/0h]tpubDFH9dgzveyD8zTbPUFuLrGmCydNvxehyNdUXKJAQN8x4aZ4j6UZqGfnqFrD4NqyaTVGKbvEW54tsvPTK2UoSbCC1PJY8iCNiwTL3RWZEheQ/<0;1>/*)#kcjfc8qw"
+    )
+    key_only_summary = embit_utils.get_descriptor_policy_summary(key_only_taproot)
+    assert "73C5DA0A" in key_only_summary
+
+    # Bare single-key descriptor: get_descriptor_policy_summary() itself should
+    # describe it safely rather than raise, even though callers today route
+    # single-key descriptors elsewhere before ever calling this function.
+    single_summary = embit_utils.get_descriptor_policy_summary(Descriptor.from_string(SINGLE_KEY_DESCRIPTOR))
+    assert "73C5DA0A" in single_summary
+
+    # 240x240-screen truncation: must never exceed max_length, and must end
+    # with a truncation marker rather than silently overflowing.
+    truncated = embit_utils.get_descriptor_policy_summary(Descriptor.from_string(LIANA_WSH_DESCRIPTOR), max_length=20)
+    assert len(truncated) <= 20
+    assert truncated.endswith("…")
+
+
+def test_can_derive_multisig_address():
+    """
+    tests seedsigner.helpers.embit_utils.can_derive_multisig_address()
+    """
+    from embit.descriptor import Descriptor
+
+    basic_multisig = Descriptor.from_string(
+        "wsh(sortedmulti(2,[8d55ff0d/48h/1h/0h/2h]tpubDDxNVWk924RTUhdkVB2uLHw1hGMPNMGufpZefhkkswjbZppVZcuMdjYKQN4ewUog9vbL6RBLFPRWcgTGT7kYP79N6thyJ43ELUs4N2szXMg/{0,1}/*,[73c5da0a/48h/1h/0h/2h]tpubDFH9dgzveyD8zTbPUFuLrGmCydNvxehyNdUXKJAQN8x4aZ4j6UZqGfnqFrD4NqyaTVGKbvEW54tsvPTK2UoSbCC1PJY8iCNiwTL3RWZEheQ/{0,1}/*,[0be174ee/48h/1h/0h/2h]tpubDEsePyLPkbxbrDiZSTTWdsviiNtiQjrvvzZnkLtG72QYLBygEsXePRsTdXi8DeMA7taCuuvoEBjUAfFrsNZeQJqfvG9fFoujYWbFPYUn7ux/{0,1}/*))#zw6cnrlk"
+    )
+    assert embit_utils.can_derive_multisig_address(basic_multisig) is True
+    assert embit_utils.can_derive_multisig_address(Descriptor.from_string(LIANA_WSH_DESCRIPTOR)) is True
+
+    # Perhaps surprisingly, True for taproot too -- see the docstring on
+    # can_derive_multisig_address(): embit's `is_segwit` covers taproot, and
+    # address derivation for it genuinely works (verified in test_get_multisig_address).
+    assert embit_utils.can_derive_multisig_address(Descriptor.from_string(LIANA_TR_DESCRIPTOR)) is True
 
 
 def test_parse_derivation_path():

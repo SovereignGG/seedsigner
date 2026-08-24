@@ -122,7 +122,10 @@ class ScanView(View):
 
                 descriptor = Descriptor.from_string(descriptor_str)
 
-                if not descriptor.is_basic_multisig:
+                from seedsigner.helpers.embit_utils import is_supported_wallet_descriptor
+                if not is_supported_wallet_descriptor(descriptor):
+                    # Bare single-key descriptor (wpkh()/pkh()); a real wallet
+                    # descriptor, just not one we have a registration flow for yet.
                     # TODO: Handle single-sig descriptors?
                     logger.info(f"Received single sig descriptor: {descriptor}")
                     return Destination(NotYetImplementedView)

@@ -379,7 +379,14 @@ class DecodeQR:
             elif "multisig setup file" in s.lower():
                 return QRType.WALLET__CONFIGFILE
 
-            elif "sortedmulti" in s:
+            elif re.search(r'^(sh|wsh|tr|pkh|wpkh|combo)\(', desc_str):
+                # Any output descriptor, identified by its top-level script type
+                # rather than by looking for `sortedmulti` specifically -- this
+                # also admits general Miniscript policies (e.g. Liana's
+                # `wsh(or_d(pk(...),and_v(...)))`) and `tr()` descriptors.
+                # GenericWalletQrDecoder validates via embit's
+                # `Descriptor.from_string()`, so a merely descriptor-shaped
+                # string that isn't a real descriptor is still rejected there.
                 return QRType.WALLET__GENERIC
 
             # Seed

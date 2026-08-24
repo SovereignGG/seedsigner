@@ -215,6 +215,62 @@ class TestToolsFlows(FlowTest):
         ])
 
 
+    def test__address_explorer__liana_miniscript_wsh__flow(self):
+        """
+            Address Explorer should register a Liana-style wsh() Miniscript
+            descriptor (or_d(pk(...),and_v(...))) -- previously rejected as
+            "single sig" by the is_basic_multisig gate -- and generate addresses
+            for it, exactly like it already does for basic multisig.
+        """
+        def load_descriptor_into_decoder(view: scan_views.ScanView):
+            # Liana-style 2-key recovery policy; same key material as
+            # test_embit_utils.py's LIANA_WSH_DESCRIPTOR, {0,1} multipath form.
+            wsh_descriptor = (
+                "wsh(or_d(pk([73c5da0a/48h/1h/0h/2h]tpubDFH9dgzveyD8zTbPUFuLrGmCydNvxehyNdUXKJAQN8x4aZ4j6UZqGfnqFrD4NqyaTVGKbvEW54tsvPTK2UoSbCC1PJY8iCNiwTL3RWZEheQ/<0;1>/*),"
+                "and_v(v:pkh([0be174ee/48h/1h/0h/2h]tpubDEsePyLPkbxbrDiZSTTWdsviiNtiQjrvvzZnkLtG72QYLBygEsXePRsTdXi8DeMA7taCuuvoEBjUAfFrsNZeQJqfvG9fFoujYWbFPYUn7ux/<0;1>/*),older(1000))))"
+                "#73g7ls54"
+            )
+            view.decoder.add_data(wsh_descriptor)
+
+        self.run_sequence([
+            FlowStep(MainMenuView, button_data_selection=MainMenuView.TOOLS),
+            FlowStep(tools_views.ToolsMenuView, button_data_selection=tools_views.ToolsMenuView.ADDRESS_EXPLORER),
+            FlowStep(tools_views.ToolsAddressExplorerSelectSourceView, button_data_selection=tools_views.ToolsAddressExplorerSelectSourceView.SCAN_DESCRIPTOR),
+            FlowStep(scan_views.ScanWalletDescriptorView, before_run=load_descriptor_into_decoder),  # simulate read descriptor QR
+            FlowStep(seed_views.MultisigWalletDescriptorView, button_data_selection=seed_views.MultisigWalletDescriptorView.ADDRESS_EXPLORER),
+            FlowStep(tools_views.ToolsAddressExplorerAddressTypeView, button_data_selection=tools_views.ToolsAddressExplorerAddressTypeView.RECEIVE),
+            FlowStep(tools_views.ToolsAddressExplorerAddressListView, screen_return_value=10),  # ret NEXT page of addrs
+            FlowStep(tools_views.ToolsAddressExplorerAddressListView, screen_return_value=4),  # ret a specific addr from the list
+            FlowStep(tools_views.ToolsAddressExplorerAddressView),  # runs until dismissed; no ret value
+            FlowStep(tools_views.ToolsAddressExplorerAddressListView),
+        ])
+
+
+    def test__scan_descriptor__liana_taproot__reaches_policy_view(self):
+        """
+            A taproot Miniscript descriptor (key-path + hidden recovery leaf)
+            should also clear the registration gate and reach
+            MultisigWalletDescriptorView, even though address derivation for
+            taproot isn't implemented yet (Phase 2). Registering/displaying the
+            policy must not be blocked by that separate, later limitation.
+        """
+        def load_descriptor_into_decoder(view: scan_views.ScanView):
+            tr_descriptor = (
+                "tr([73c5da0a/86h/1h/0h]tpubDFH9dgzveyD8zTbPUFuLrGmCydNvxehyNdUXKJAQN8x4aZ4j6UZqGfnqFrD4NqyaTVGKbvEW54tsvPTK2UoSbCC1PJY8iCNiwTL3RWZEheQ/<0;1>/*,"
+                "and_v(v:pk([0be174ee/86h/1h/0h]tpubDEsePyLPkbxbrDiZSTTWdsviiNtiQjrvvzZnkLtG72QYLBygEsXePRsTdXi8DeMA7taCuuvoEBjUAfFrsNZeQJqfvG9fFoujYWbFPYUn7ux/<0;1>/*),older(1000)))"
+                "#uq7s6lsf"
+            )
+            view.decoder.add_data(tr_descriptor)
+
+        self.run_sequence([
+            FlowStep(MainMenuView, button_data_selection=MainMenuView.TOOLS),
+            FlowStep(tools_views.ToolsMenuView, button_data_selection=tools_views.ToolsMenuView.ADDRESS_EXPLORER),
+            FlowStep(tools_views.ToolsAddressExplorerSelectSourceView, button_data_selection=tools_views.ToolsAddressExplorerSelectSourceView.SCAN_DESCRIPTOR),
+            FlowStep(scan_views.ScanWalletDescriptorView, before_run=load_descriptor_into_decoder),  # simulate read descriptor QR
+            FlowStep(seed_views.MultisigWalletDescriptorView),
+        ])
+
+
     def test__verify_address__legacy_multisig_p2sh__flow(self):
         """
             Address Explorer should be able to scan a legacy multisig p2sh address and

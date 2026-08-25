@@ -1590,6 +1590,7 @@ class MultisigWalletDescriptorScreen(ButtonListScreen):
             font_size=20,
             screen_y=self.top_nav.height,
             is_text_centered=True,
+            auto_line_break=True,
         ))
 
         self.components.append(IconTextLine(

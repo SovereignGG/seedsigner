@@ -4,11 +4,13 @@ import random
 from binascii import a2b_base64
 from copy import deepcopy
 from unittest.mock import patch
-from embit import bip32, script
+from embit import bip32, bip39, script
 from embit.ec import PublicKey
 from embit.networks import NETWORKS
 from embit.psbt import PSBT, DerivationPath
 from embit.descriptor import Descriptor
+from embit.descriptor.checksum import add_checksum
+from embit.transaction import Transaction, TransactionInput, TransactionOutput
 
 from seedsigner.models.psbt_parser import (PSBTInputOwnershipClaimError,
     PSBTOutputOwnershipClaimError, PSBTParser, PSBTSeedCannotSignError)
@@ -1238,3 +1240,133 @@ class TestPSBTParserSeedOwnership:
 
         with pytest.raises(PSBTSeedCannotSignError):
             self._parse(psbt)
+
+class TestPSBTParserMiniscript:
+    """
+    Regression tests for two crashes found only by running a real Liana Miniscript
+    PSBT through PSBTParser on physical SeedSigner hardware -- neither was caught by
+    the existing basic-multisig/single-sig test fixtures above, since both are
+    specific to a witness script that isn't a bare OP_CHECKMULTISIG script.
+
+    Builds a real wsh(or_d(pk(...),and_v(v:pkh(...),older(...)))) descriptor from
+    scratch (Liana's standard "primary key OR recovery-key-after-timelock" policy)
+    using the same known-safe test mnemonics already used elsewhere in this file's
+    sibling PSBTTestData vectors, rather than reusing pre-recorded hex snippets --
+    there's no existing Miniscript fixture to draw from.
+    """
+    MNEMONIC_PRIMARY = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+    MNEMONIC_RECOVERY = "baby mass dust captain baby mass dust captain baby mass dust casino"
+    MNEMONIC_FOREIGN = "sign sword lift deer ocean insect web lazy sick pencil start select"
+
+    def build_miniscript_psbt(self):
+        """
+        Returns (psbt, seed, our_change_address, foreign_address) for a single-input
+        spend from a Liana-style wsh() Miniscript wallet:
+          - 1 input, spending our wsh() UTXO (triggers _get_policy -> _parse_multisig
+            on a non-bare-multisig script -- this alone crashed before the fix)
+          - output 0: our own change (branch 1, correctly carries witness_script +
+            bip32_derivations, exactly as a real coordinator like Liana populates it
+            for its own outputs)
+          - output 1: an unrelated p2wsh output belonging to a different wallet
+            entirely, with NO witness_script and NO bip32_derivations -- exactly
+            what a real coordinator does for an output it doesn't recognize as its
+            own. Before the fix, this output could still spuriously match our
+            degraded {"type": "p2wsh"} policy (no m/n/cosigners to tell wallets
+            apart) and crash trying to reconstruct a script from a None witness_script.
+        """
+        net = NETWORKS["regtest"]
+
+        root_primary = bip32.HDKey.from_seed(bip39.mnemonic_to_seed(self.MNEMONIC_PRIMARY), version=net["xprv"])
+        fp_primary = root_primary.my_fingerprint
+        acct_primary = root_primary.derive("m/48h/1h/0h/2h")
+        xpub_primary = acct_primary.to_public().to_base58(version=net["xpub"])
+
+        root_recovery = bip32.HDKey.from_seed(bip39.mnemonic_to_seed(self.MNEMONIC_RECOVERY), version=net["xprv"])
+        fp_recovery = root_recovery.my_fingerprint
+        acct_recovery = root_recovery.derive("m/48h/1h/0h/2h")
+        xpub_recovery = acct_recovery.to_public().to_base58(version=net["xpub"])
+
+        body = (
+            f"wsh(or_d(pk([{fp_primary.hex()}/48h/1h/0h/2h]{xpub_primary}/<0;1>/*),"
+            f"and_v(v:pkh([{fp_recovery.hex()}/48h/1h/0h/2h]{xpub_recovery}/<0;1>/*),older(2))))"
+        )
+        descriptor = Descriptor.from_string(add_checksum(body))
+
+        inp_derived = descriptor.derive(0, branch_index=0)
+        inp_script = inp_derived.script_pubkey()
+        inp_witness_script = script.Script(inp_derived.miniscript.compile())
+        inp_pubkey = acct_primary.derive("m/0/0").to_public()
+
+        change_derived = descriptor.derive(0, branch_index=1)
+        change_script = change_derived.script_pubkey()
+        change_witness_script = script.Script(change_derived.miniscript.compile())
+        change_pubkey = acct_primary.derive("m/1/0").to_public()
+
+        root_foreign = bip32.HDKey.from_seed(bip39.mnemonic_to_seed(self.MNEMONIC_FOREIGN), version=net["xprv"])
+        foreign_pubkey = root_foreign.derive("m/0h").to_public()
+        # Trivial p2wsh(pk) script -- content doesn't matter, only that it's a
+        # p2wsh output this wallet has no key for and no witness_script to verify.
+        foreign_script = script.p2wsh(script.Script(b"\x21" + foreign_pubkey.sec() + b"\xac"))
+
+        tx = Transaction(
+            vin=[TransactionInput(bytes(32), 0)],
+            vout=[
+                TransactionOutput(50_000, change_script),
+                TransactionOutput(30_000, foreign_script),
+            ],
+        )
+        psbt = PSBT(tx)
+        inp = psbt.inputs[0]
+        inp.witness_utxo = TransactionOutput(100_000, inp_script)
+        inp.witness_script = inp_witness_script
+        inp.bip32_derivations[inp_pubkey] = DerivationPath(fp_primary, [48 + 2**31, 1 + 2**31, 0 + 2**31, 2 + 2**31, 0, 0])
+
+        psbt.outputs[0].witness_script = change_witness_script
+        psbt.outputs[0].bip32_derivations[change_pubkey] = DerivationPath(fp_primary, [48 + 2**31, 1 + 2**31, 0 + 2**31, 2 + 2**31, 1, 0])
+        # output 1 (foreign) deliberately gets no witness_script / bip32_derivations.
+
+        seed = Seed(self.MNEMONIC_PRIMARY.split())
+        return psbt, seed, change_script.address(network=net), foreign_script.address(network=net)
+
+
+    def test_miniscript_input_does_not_crash_policy_parsing(self):
+        """
+        Regression test: _get_policy() -> _parse_multisig() used to raise an
+        unhandled ValueError("Not a multisig script") for any witness script that
+        isn't bare OP_CHECKMULTISIG, which includes every real Miniscript wsh()
+        script. This crashed PSBTParser's __init__ outright on real hardware when
+        scanning a genuine Liana Miniscript PSBT.
+        """
+        psbt, seed, _, _ = self.build_miniscript_psbt()
+
+        # Must not raise.
+        psbt_parser = PSBTParser(p=psbt, seed=seed, network=SettingsConstants.REGTEST)
+
+        assert psbt_parser.num_inputs == 1
+        assert psbt_parser.policy["type"] == "p2wsh"
+        assert "m" not in psbt_parser.policy  # degraded policy: no cosigners to report
+        assert "n" not in psbt_parser.policy
+
+
+    def test_foreign_output_not_misattributed_as_change(self):
+        """
+        Regression test: with a degraded policy (no m/n/cosigners), out_policy ==
+        self.policy only proves an output's script *type* matches ours, not that
+        it's actually part of our wallet. Before the fix, an unrelated same-type
+        output reaching the change-reconstruction code with witness_script still
+        None crashed in script.p2wsh(). This confirms it's now correctly classified
+        as an external destination instead -- not just "doesn't crash", but
+        actually correct: our own change is still found, and the foreign output is
+        never mistaken for it.
+        """
+        psbt, seed, our_change_address, foreign_address = self.build_miniscript_psbt()
+
+        psbt_parser = PSBTParser(p=psbt, seed=seed, network=SettingsConstants.REGTEST)
+
+        assert psbt_parser.num_change_outputs == 1
+        assert psbt_parser.change_amount == 50_000
+        assert psbt_parser.change_data[0]["address"] == our_change_address
+
+        assert psbt_parser.num_destinations == 1
+        assert psbt_parser.spend_amount == 30_000
+        assert psbt_parser.destination_addresses == [foreign_address]

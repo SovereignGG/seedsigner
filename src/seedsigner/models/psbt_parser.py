@@ -304,14 +304,23 @@ class PSBTParser():
                 sc = script.Script(b"")
 
                 # multisig, we know witness script
-                if self.policy["type"] == "p2wsh":
+                #
+                # A degraded policy (no m/n/cosigners -- e.g. a Miniscript wsh()
+                # policy like Liana's) only tells us the output's script *type*
+                # matches ours, not that it's actually part of our wallet. An
+                # unrelated output of the same type (e.g. the destination
+                # address) can reach here with no witness_script/redeem_script
+                # populated at all, since Liana only fills those in for outputs
+                # it recognizes as its own. Treat "no script" as "not a match"
+                # rather than crashing trying to reconstruct one from None.
+                if self.policy["type"] == "p2wsh" and out.witness_script is not None:
                     sc = script.p2wsh(out.witness_script)
 
-                elif self.policy["type"] == "p2sh-p2wsh":
+                elif self.policy["type"] == "p2sh-p2wsh" and out.witness_script is not None:
                     sc = script.p2sh(script.p2wsh(out.witness_script))
-                
+
                 # Arbitrary p2sh; includes pre-segwit multisig (m/45')
-                elif self.policy["type"] == "p2sh":
+                elif self.policy["type"] == "p2sh" and out.redeem_script is not None:
                     sc = script.p2sh(out.redeem_script)
 
                 # single-sig

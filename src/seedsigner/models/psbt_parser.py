@@ -440,20 +440,28 @@ class PSBTParser():
                 script = scope.redeem_script
 
             if script is not None:
-                m, n, pubkeys = PSBTParser._parse_multisig(script)
-            
-                # check pubkeys are derived from cosigners
                 try:
-                    cosigners = PSBTParser._get_cosigners(pubkeys, scope.bip32_derivations, xpubs, child_key_derivation_cache)
-                    policy.update({"m": m, "n": n, "cosigners": cosigners})
-                except:
-                    # TODO: stop swallowing everything here. This also catches bugs in the
-                    # cosigner check itself, and cannot tell those apart from the psbt
-                    # simply not supplying xpubs to check against, which is valid and must
-                    # not be rejected outright. The fallback policy carries no cosigner
-                    # information at all, and two of those compare equal on script type
-                    # and m-of-n alone. Fix pending with the multisig verification work.
-                    policy.update({"m": m, "n": n})
+                    m, n, pubkeys = PSBTParser._parse_multisig(script)
+                except ValueError:
+                    # Not a bare OP_CHECKMULTISIG script -- e.g. a Miniscript
+                    # witness script (wsh() policies like Liana's). policy
+                    # stays at just {"type": script_type}; there's no m/n/
+                    # cosigners to report, but this isn't a parse failure.
+                    m = n = pubkeys = None
+
+                if m is not None:
+                    # check pubkeys are derived from cosigners
+                    try:
+                        cosigners = PSBTParser._get_cosigners(pubkeys, scope.bip32_derivations, xpubs, child_key_derivation_cache)
+                        policy.update({"m": m, "n": n, "cosigners": cosigners})
+                    except:
+                        # TODO: stop swallowing everything here. This also catches bugs in the
+                        # cosigner check itself, and cannot tell those apart from the psbt
+                        # simply not supplying xpubs to check against, which is valid and must
+                        # not be rejected outright. The fallback policy carries no cosigner
+                        # information at all, and two of those compare equal on script type
+                        # and m-of-n alone. Fix pending with the multisig verification work.
+                        policy.update({"m": m, "n": n})
         
         return policy
 

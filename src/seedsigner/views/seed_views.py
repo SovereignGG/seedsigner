@@ -2057,9 +2057,9 @@ class MultisigWalletDescriptorView(View):
         for key in descriptor.keys:
             fingerprint = hexlify(key.fingerprint).decode()
             fingerprints.append(fingerprint)
-        
-        from seedsigner.helpers.embit_utils import get_descriptor_policy_summary
-        policy = get_descriptor_policy_summary(descriptor)
+
+        from seedsigner.helpers.embit_utils import get_descriptor_policy_summary, match_liana_recovery_policy
+        recovery_policy = match_liana_recovery_policy(descriptor)
 
         button_data = [self.OK]
         if self.controller.resume_main_flow:
@@ -2072,12 +2072,21 @@ class MultisigWalletDescriptorView(View):
             elif self.controller.resume_main_flow == Controller.FLOW__ADDRESS_EXPLORER:
                 button_data = [self.ADDRESS_EXPLORER]
 
-        selected_menu_num = self.run_screen(
-            seed_screens.MultisigWalletDescriptorScreen,
-            policy=policy,
-            fingerprints=fingerprints,
-            button_data=button_data,
-        )
+        if recovery_policy is not None:
+            selected_menu_num = self.run_screen(
+                seed_screens.LianaRecoveryWalletScreen,
+                primary_fingerprint=hexlify(recovery_policy.primary_key.fingerprint).decode(),
+                recovery_fingerprint=hexlify(recovery_policy.recovery_key.fingerprint).decode(),
+                timelock_blocks=recovery_policy.timelock_blocks,
+                button_data=button_data,
+            )
+        else:
+            selected_menu_num = self.run_screen(
+                seed_screens.MultisigWalletDescriptorScreen,
+                policy=get_descriptor_policy_summary(descriptor),
+                fingerprints=fingerprints,
+                button_data=button_data,
+            )
 
         if selected_menu_num == RET_CODE__BACK_BUTTON:
             self.controller.multisig_wallet_descriptor = None

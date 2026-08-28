@@ -1606,6 +1606,54 @@ class MultisigWalletDescriptorScreen(ButtonListScreen):
 
 
 @dataclass
+class LianaRecoveryWalletScreen(ButtonListScreen):
+    """
+    Curated review screen for the one Miniscript shape this build supports
+    (see embit_utils.match_liana_recovery_policy): spendable now by a primary
+    key, or by a recovery key after a relative timelock.
+
+    Deliberately two separate labeled fields rather than one line of policy
+    text. A generic "(key A) or ((key B) and (after N blocks))" summary
+    forces the user to mentally track parenthesization to know which
+    conditions actually apply together, which reviewers flagged as
+    unreadable and unsafe on this screen size (seedsigner#306, PR #1026).
+    Structured fields make the OR and the timelock explicit without any
+    expression to parse.
+    """
+    primary_fingerprint: str = None
+    recovery_fingerprint: str = None
+    timelock_blocks: int = None
+
+    def __post_init__(self):
+        self.title = _("Recovery Wallet")
+        self.is_bottom_list = True
+        super().__post_init__()
+
+        self.components.append(IconTextLine(
+            # TRANSLATOR_NOTE: Label for the key that can spend immediately, with no waiting period
+            label_text=_("Spend now with"),
+            value_text=self.primary_fingerprint,
+            font_size=24,
+            font_name=GUIConstants.FIXED_WIDTH_EMPHASIS_FONT_NAME,
+            screen_y=self.top_nav.height,
+            is_text_centered=True,
+            auto_line_break=True,
+        ))
+
+        self.components.append(IconTextLine(
+            # TRANSLATOR_NOTE: Label for the recovery key; {n} is the number of blocks that must pass first
+            label_text=_("OR after {n} blocks with").format(n=self.timelock_blocks),
+            value_text=self.recovery_fingerprint,
+            font_size=24,
+            font_name=GUIConstants.FIXED_WIDTH_EMPHASIS_FONT_NAME,
+            screen_y=self.components[-1].screen_y + self.components[-1].height + 2*GUIConstants.COMPONENT_PADDING,
+            is_text_centered=True,
+            auto_line_break=True,
+        ))
+
+
+
+@dataclass
 class SeedSignMessageConfirmMessageScreen(ButtonListScreen):
     page_num: int = None
 

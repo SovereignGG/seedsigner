@@ -425,14 +425,83 @@ def test_is_supported_wallet_descriptor():
     )
     assert embit_utils.is_supported_wallet_descriptor(basic_multisig) is True
 
-    # New: general wsh() Miniscript (Liana-style)
+    # Curated Miniscript template only: wsh() shape matching match_liana_recovery_policy()
     assert embit_utils.is_supported_wallet_descriptor(Descriptor.from_string(LIANA_WSH_DESCRIPTOR)) is True
 
-    # New: taproot, with a hidden script-path leaf
+    # Curated Miniscript template only: tr() shape matching match_liana_recovery_policy()
     assert embit_utils.is_supported_wallet_descriptor(Descriptor.from_string(LIANA_TR_DESCRIPTOR)) is True
+
+    # Taproot key-path only (no hidden leaves): trivially safe, accepted generically
+    key_only_taproot = Descriptor.from_string(
+        "tr([73c5da0a/86h/1h/0h]tpubDFH9dgzveyD8zTbPUFuLrGmCydNvxehyNdUXKJAQN8x4aZ4j6UZqGfnqFrD4NqyaTVGKbvEW54tsvPTK2UoSbCC1PJY8iCNiwTL3RWZEheQ/<0;1>/*)#kcjfc8qw"
+    )
+    assert embit_utils.is_supported_wallet_descriptor(key_only_taproot) is True
+
+    # Arbitrary Miniscript that does NOT match the curated template must be
+    # rejected -- this is the entire point of narrowing the gate. Regression
+    # test for the exact concern raised in review (seedsigner#306, PR #1026):
+    # a generic AST-to-English summary was previously accepted for any wsh()
+    # Miniscript, which reviewers flagged as unreadable/unsafe on-device once
+    # policies get more complex than one OR of two simple branches.
+    complex_policy = Descriptor.from_string(
+        "wsh(or_d("
+        "multi(2,[8d55ff0d/48h/1h/0h/2h]tpubDDxNVWk924RTUhdkVB2uLHw1hGMPNMGufpZefhkkswjbZppVZcuMdjYKQN4ewUog9vbL6RBLFPRWcgTGT7kYP79N6thyJ43ELUs4N2szXMg/<0;1>/*,"
+        "[73c5da0a/48h/1h/0h/2h]tpubDFH9dgzveyD8zTbPUFuLrGmCydNvxehyNdUXKJAQN8x4aZ4j6UZqGfnqFrD4NqyaTVGKbvEW54tsvPTK2UoSbCC1PJY8iCNiwTL3RWZEheQ/<0;1>/*,"
+        "[0be174ee/48h/1h/0h/2h]tpubDEsePyLPkbxbrDiZSTTWdsviiNtiQjrvvzZnkLtG72QYLBygEsXePRsTdXi8DeMA7taCuuvoEBjUAfFrsNZeQJqfvG9fFoujYWbFPYUn7ux/<0;1>/*),"
+        "and_v(v:pkh([0f889044/48h/1h/0h/2h]tpubDFQDKbH2mDqNDPNaUVxM6R5mHhzC4u5F6mNnUkCf6gBMbcENMQ1ZGFLZc3QwgdEv2f34wkTvLMG5kD8AZEZRhat1HQDj42eVxQSxbcqxn31/<0;1>/*),older(25920))))"
+    )
+    assert embit_utils.is_supported_wallet_descriptor(complex_policy) is False
 
     # Bare single-key descriptor: still excluded (unimplemented single-sig import)
     assert embit_utils.is_supported_wallet_descriptor(Descriptor.from_string(SINGLE_KEY_DESCRIPTOR)) is False
+
+
+def test_match_liana_recovery_policy():
+    """
+    tests seedsigner.helpers.embit_utils.match_liana_recovery_policy()
+    """
+    from embit.descriptor import Descriptor
+    from embit.descriptor.checksum import add_checksum
+
+    wsh_match = embit_utils.match_liana_recovery_policy(Descriptor.from_string(LIANA_WSH_DESCRIPTOR))
+    assert wsh_match is not None
+    assert wsh_match.primary_key.fingerprint.hex() == "73c5da0a"
+    assert wsh_match.recovery_key.fingerprint.hex() == "0be174ee"
+    assert wsh_match.timelock_blocks == 1000
+
+    tr_match = embit_utils.match_liana_recovery_policy(Descriptor.from_string(LIANA_TR_DESCRIPTOR))
+    assert tr_match is not None
+    assert tr_match.primary_key.fingerprint.hex() == "73c5da0a"
+    assert tr_match.recovery_key.fingerprint.hex() == "0be174ee"
+    assert tr_match.timelock_blocks == 1000
+
+    # Basic multisig is a completely different shape -- no match, not an error
+    basic_multisig = Descriptor.from_string(
+        "wsh(sortedmulti(2,[8d55ff0d/48h/1h/0h/2h]tpubDDxNVWk924RTUhdkVB2uLHw1hGMPNMGufpZefhkkswjbZppVZcuMdjYKQN4ewUog9vbL6RBLFPRWcgTGT7kYP79N6thyJ43ELUs4N2szXMg/{0,1}/*,[73c5da0a/48h/1h/0h/2h]tpubDFH9dgzveyD8zTbPUFuLrGmCydNvxehyNdUXKJAQN8x4aZ4j6UZqGfnqFrD4NqyaTVGKbvEW54tsvPTK2UoSbCC1PJY8iCNiwTL3RWZEheQ/{0,1}/*,[0be174ee/48h/1h/0h/2h]tpubDEsePyLPkbxbrDiZSTTWdsviiNtiQjrvvzZnkLtG72QYLBygEsXePRsTdXi8DeMA7taCuuvoEBjUAfFrsNZeQJqfvG9fFoujYWbFPYUn7ux/{0,1}/*))#zw6cnrlk"
+    )
+    assert embit_utils.match_liana_recovery_policy(basic_multisig) is None
+
+    assert embit_utils.match_liana_recovery_policy(Descriptor.from_string(SINGLE_KEY_DESCRIPTOR)) is None
+
+    # A third OR branch, or any other shape beyond exactly "primary, or
+    # recovery-after-timelock" -- must not match, even though it superficially
+    # resembles the template (still an or_d at the top, still has an older()).
+    three_way = Descriptor.from_string(add_checksum(
+        "wsh(or_d(pk([73c5da0a/48h/1h/0h/2h]tpubDFH9dgzveyD8zTbPUFuLrGmCydNvxehyNdUXKJAQN8x4aZ4j6UZqGfnqFrD4NqyaTVGKbvEW54tsvPTK2UoSbCC1PJY8iCNiwTL3RWZEheQ/<0;1>/*),"
+        "or_i(and_v(v:pkh([0be174ee/48h/1h/0h/2h]tpubDEsePyLPkbxbrDiZSTTWdsviiNtiQjrvvzZnkLtG72QYLBygEsXePRsTdXi8DeMA7taCuuvoEBjUAfFrsNZeQJqfvG9fFoujYWbFPYUn7ux/<0;1>/*),older(1000)),"
+        "and_v(v:pkh([0f889044/48h/1h/0h/2h]tpubDFQDKbH2mDqNDPNaUVxM6R5mHhzC4u5F6mNnUkCf6gBMbcENMQ1ZGFLZc3QwgdEv2f34wkTvLMG5kD8AZEZRhat1HQDj42eVxQSxbcqxn31/<0;1>/*),older(2000)))))"
+    ))
+    assert embit_utils.match_liana_recovery_policy(three_way) is None
+
+    # BIP68 time-based timelock (bit 22 set: 512-second units, not blocks).
+    # Liana has never been observed to produce this encoding for this policy
+    # shape; deliberately left unrecognized rather than assumed == blocks.
+    # older(1000 | 0x00400000) as raw pushed argument.
+    time_based = Descriptor.from_string(add_checksum(
+        "wsh(or_d(pk([73c5da0a/48h/1h/0h/2h]tpubDFH9dgzveyD8zTbPUFuLrGmCydNvxehyNdUXKJAQN8x4aZ4j6UZqGfnqFrD4NqyaTVGKbvEW54tsvPTK2UoSbCC1PJY8iCNiwTL3RWZEheQ/<0;1>/*),"
+        "and_v(v:pkh([0be174ee/48h/1h/0h/2h]tpubDEsePyLPkbxbrDiZSTTWdsviiNtiQjrvvzZnkLtG72QYLBygEsXePRsTdXi8DeMA7taCuuvoEBjUAfFrsNZeQJqfvG9fFoujYWbFPYUn7ux/<0;1>/*),older(4195304))))"
+    ))
+    assert embit_utils.match_liana_recovery_policy(time_based) is None
 
 
 def test_get_descriptor_policy_summary():

@@ -143,15 +143,34 @@ def is_supported_wallet_descriptor(descriptor: Descriptor) -> bool:
     Whether `descriptor` is one we know how to register, display, and (where
     Address Explorer / Verify Addr are concerned) derive addresses for.
 
-    This is deliberately broader than `is_basic_multisig`: it also accepts
-    general wsh() Miniscript policies (e.g. Liana's or_d(pk(...),and_v(...))
-    recovery policies) and taproot descriptors. Taproot registration/display is
-    allowed because `get_descriptor_policy_summary()` can describe it correctly
-    -- taproot *address verification* and *script-path signing* remain
-    separately gated in `get_multisig_address()` and `PSBTParser`, which still
-    correctly raise "not yet implemented" for the taproot cases that aren't
-    ready, so allowing registration here doesn't let a user get further than
-    what's actually supported.
+    Deliberately narrower than "any valid wsh()/tr() Miniscript". An earlier
+    version of this accepted arbitrary Miniscript and rendered it through a
+    generic recursive AST-to-English summary. Reviewers correctly flagged
+    that as unsafe: a raw nested boolean expression forces the user to
+    mentally track parenthesization to know which conditions actually apply
+    together, and that gets unreadable fast on a 240x240 screen -- exactly
+    the class of footgun SeedSigner's UI otherwise goes out of its way to
+    avoid. See discussion on seedsigner#306 and PR #1026.
+
+    So Miniscript support here is template-gated, not general: only the one
+    specific shape recognized by `match_liana_recovery_policy()` --
+    "spendable now by a primary key, or by a recovery key after a relative
+    timelock" -- gets accepted, and it is displayed through curated,
+    structured fields (see `LianaRecoveryDescriptorView`/`Screen`), never as
+    raw or generically-rendered policy text. Anything else -- thresh(),
+    multi() inside wsh() Miniscript, additional OR branches, a different
+    wrapper shape -- is rejected here exactly like it always has been,
+    falling through to `NotYetImplementedView`.
+
+    Taproot is accepted only for a plain key-path-only spend (no hidden
+    script-path leaves at all -- trivially just "one key", nothing to
+    misread) or for the same curated recovery shape via its single hidden
+    leaf. Any other taproot script-path structure is rejected for the same
+    reason as above.
+
+    Basic multisig is unaffected and unrelated to this gate; it is not
+    Miniscript and was already curated (m-of-n, cosigner fingerprints) before
+    any of this.
 
     A bare single-key descriptor (wpkh()/pkh(), no miniscript, no taproot
     script path) is intentionally excluded -- that's a plain single-sig import,
@@ -160,9 +179,13 @@ def is_supported_wallet_descriptor(descriptor: Descriptor) -> bool:
     if descriptor.is_basic_multisig:
         return True
     if descriptor.is_taproot:
-        return True
+        # Key-path-only (no hidden leaves at all) is just a single key --
+        # nothing to misread, safe to accept generically.
+        if not _flatten_taptree_leaves(descriptor.taptree):
+            return True
+        return match_liana_recovery_policy(descriptor) is not None
     if descriptor.is_segwit and descriptor.miniscript is not None:
-        return True
+        return match_liana_recovery_policy(descriptor) is not None
     return False
 
 
@@ -268,6 +291,109 @@ def _flatten_taptree_leaves(taptree: TapTree) -> list:
         return [taptree.tree]
     left, right = taptree.tree
     return _flatten_taptree_leaves(left) + _flatten_taptree_leaves(right)
+
+
+
+class LianaRecoveryPolicy:
+    """
+    Fields extracted from a descriptor matching the one curated Miniscript
+    shape this build supports. See `match_liana_recovery_policy()`.
+    """
+    __slots__ = ("primary_key", "recovery_key", "timelock_blocks")
+
+    def __init__(self, primary_key, recovery_key, timelock_blocks: int):
+        self.primary_key = primary_key      # Key
+        self.recovery_key = recovery_key    # Key (tr) or KeyHash (wsh)
+        self.timelock_blocks = timelock_blocks
+
+
+
+def _unwrap(node):
+    """Strip Miniscript wrapper layers (v:, s:, a:, ...) down to the fragment
+    they wrap. Wrappers change stack/verify mechanics, not the underlying
+    spending condition, so template matching should see through them."""
+    while isinstance(node, Wrapper):
+        node = node.arg
+    return node
+
+
+
+def match_liana_recovery_policy(descriptor: Descriptor):
+    """
+    Recognizes exactly one Miniscript shape: spendable now by a primary key,
+    or by a recovery key after a relative (block-based) timelock -- Liana's
+    inheritance wallet policy, and the only Miniscript shape this build
+    displays with curated fields rather than generic policy text (see
+    `is_supported_wallet_descriptor()`).
+
+        wsh():  or_d(pk(primary), and_v(v:pkh(recovery), older(N)))
+        tr():   primary is the key-path (internal) key; the single hidden
+                script-path leaf is and_v(v:pk(recovery), older(N))
+
+    Returns a `LianaRecoveryPolicy`, or `None` if the descriptor is anything
+    else -- including this exact shape but with a BIP68 *time-based* (rather
+    than block-based) timelock encoding. Liana has never been observed to
+    produce that encoding (every real descriptor and confirmed on-chain spend
+    used in this PR's own hardware testing used plain block counts), so it is
+    deliberately left unrecognized rather than assumed equivalent to blocks.
+
+    Structural match only -- this does not verify the keys are ours or derive
+    anything. That happens downstream (PSBTParser, verify_multisig_output())
+    exactly as it does for basic multisig.
+    """
+    if descriptor.is_basic_multisig:
+        return None
+
+    if descriptor.is_taproot:
+        leaves = _flatten_taptree_leaves(descriptor.taptree)
+        if len(leaves) != 1:
+            return None
+        primary_node = descriptor.key
+        if primary_node is None:
+            return None
+        recovery_branch = _unwrap(leaves[0].miniscript)
+
+    elif descriptor.is_segwit and descriptor.miniscript is not None:
+        top = _unwrap(descriptor.miniscript)
+        if getattr(top, "NAME", None) != "or_d":
+            return None
+
+        pk_node = _unwrap(top.args[0])
+        if getattr(pk_node, "NAME", None) != "pk":
+            return None
+        primary_node = pk_node.arg
+
+        recovery_branch = _unwrap(top.args[1])
+
+    else:
+        return None
+
+    if getattr(recovery_branch, "NAME", None) != "and_v":
+        return None
+
+    recovery_key_node = _unwrap(recovery_branch.args[0])
+    timelock_node = _unwrap(recovery_branch.args[1])
+
+    # tr()'s script-path leaf uses pk() (schnorr, no hash160 needed); wsh()
+    # uses pkh(). Both are accepted here; which one is structurally forced
+    # by which branch above ran, but re-checking costs nothing and keeps this
+    # function correct even if that assumption ever changes.
+    if getattr(recovery_key_node, "NAME", None) not in ("pk", "pkh"):
+        return None
+    if getattr(timelock_node, "NAME", None) != "older":
+        return None
+
+    raw = timelock_node.arg.num
+    if raw & 0x00400000:
+        # BIP68 type-flag bit set: time-based (512-second units), not blocks.
+        return None
+    timelock_blocks = raw & 0x0000FFFF
+
+    return LianaRecoveryPolicy(
+        primary_key=primary_node,
+        recovery_key=recovery_key_node.arg,
+        timelock_blocks=timelock_blocks,
+    )
 
 
 

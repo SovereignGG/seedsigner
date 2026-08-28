@@ -1370,3 +1370,167 @@ class TestPSBTParserMiniscript:
         assert psbt_parser.num_destinations == 1
         assert psbt_parser.spend_amount == 30_000
         assert psbt_parser.destination_addresses == [foreign_address]
+
+
+    def build_liana_style_psbt(self, attach_our_derivation_to_foreign_output: bool = False):
+        """
+        Same wallet as build_miniscript_psbt(), but models how Liana *actually*
+        populates its own change output, which is the case the fixture above got
+        wrong: bip32_derivations are supplied, witness_script is NOT.
+
+        Confirmed against a real Liana v15.0 signet PSBT, whose change output
+        carried two bip32_derivations (branch 1) and no witness_script at all. The
+        fixture above assumed a coordinator always fills in witness_script for its
+        own outputs; because that assumption was baked into the test data, the
+        entire class passed while real hardware silently misclassified change.
+
+        attach_our_derivation_to_foreign_output models a hostile coordinator: it
+        attaches a genuine derivation of *our* pubkey to an output paying a script
+        we have no control over, to confirm that "references our key" is treated
+        only as a candidate and never as ownership.
+
+        Returns (psbt, seed, descriptor, our_change_address, foreign_address).
+        """
+        net = NETWORKS["regtest"]
+
+        root_primary = bip32.HDKey.from_seed(bip39.mnemonic_to_seed(self.MNEMONIC_PRIMARY), version=net["xprv"])
+        fp_primary = root_primary.my_fingerprint
+        acct_primary = root_primary.derive("m/48h/1h/0h/2h")
+        xpub_primary = acct_primary.to_public().to_base58(version=net["xpub"])
+
+        root_recovery = bip32.HDKey.from_seed(bip39.mnemonic_to_seed(self.MNEMONIC_RECOVERY), version=net["xprv"])
+        fp_recovery = root_recovery.my_fingerprint
+        acct_recovery = root_recovery.derive("m/48h/1h/0h/2h")
+        xpub_recovery = acct_recovery.to_public().to_base58(version=net["xpub"])
+
+        body = (
+            f"wsh(or_d(pk([{fp_primary.hex()}/48h/1h/0h/2h]{xpub_primary}/<0;1>/*),"
+            f"and_v(v:pkh([{fp_recovery.hex()}/48h/1h/0h/2h]{xpub_recovery}/<0;1>/*),older(2))))"
+        )
+        descriptor = Descriptor.from_string(add_checksum(body))
+
+        inp_derived = descriptor.derive(0, branch_index=0)
+        inp_script = inp_derived.script_pubkey()
+        inp_witness_script = script.Script(inp_derived.miniscript.compile())
+        inp_pubkey = acct_primary.derive("m/0/0").to_public()
+
+        change_derived = descriptor.derive(0, branch_index=1)
+        change_script = change_derived.script_pubkey()
+        change_pubkey = acct_primary.derive("m/1/0").to_public()
+        recovery_change_pubkey = acct_recovery.derive("m/1/0").to_public()
+
+        root_foreign = bip32.HDKey.from_seed(bip39.mnemonic_to_seed(self.MNEMONIC_FOREIGN), version=net["xprv"])
+        foreign_pubkey = root_foreign.derive("m/0h").to_public()
+        foreign_script = script.p2wsh(script.Script(b"\x21" + foreign_pubkey.sec() + b"\xac"))
+
+        tx = Transaction(
+            vin=[TransactionInput(bytes(32), 0)],
+            vout=[
+                TransactionOutput(50_000, change_script),
+                TransactionOutput(30_000, foreign_script),
+            ],
+        )
+        psbt = PSBT(tx)
+        inp = psbt.inputs[0]
+        inp.witness_utxo = TransactionOutput(100_000, inp_script)
+        inp.witness_script = inp_witness_script
+        inp.bip32_derivations[inp_pubkey] = DerivationPath(fp_primary, [48 + 2**31, 1 + 2**31, 0 + 2**31, 2 + 2**31, 0, 0])
+
+        # The real-Liana shape: derivations for both wallet keys, no witness_script.
+        change_path = [48 + 2**31, 1 + 2**31, 0 + 2**31, 2 + 2**31, 1, 0]
+        psbt.outputs[0].bip32_derivations[change_pubkey] = DerivationPath(fp_primary, change_path)
+        psbt.outputs[0].bip32_derivations[recovery_change_pubkey] = DerivationPath(fp_recovery, change_path)
+
+        if attach_our_derivation_to_foreign_output:
+            psbt.outputs[1].bip32_derivations[change_pubkey] = DerivationPath(fp_primary, change_path)
+
+        seed = Seed(self.MNEMONIC_PRIMARY.split())
+        return psbt, seed, descriptor, change_script.address(network=net), foreign_script.address(network=net)
+
+
+    def test_liana_style_change_without_witness_script_is_detected_as_change(self):
+        """
+        Regression test for the bug this class originally shipped with: Liana does
+        not populate witness_script on its own change output, so the p2wsh branch
+        of _parse_outputs could not rebuild the scriptpubkey and fell through to
+        "not change". The change was then counted as money leaving the wallet.
+
+        Observed on real hardware: a 10,000 sat input spending 5,000 to a recipient
+        with 4,827 back as change displayed a 9,827 sat spend -- change plus payment
+        -- and offered the user no confirmation that the 4,827 was returning to
+        them.
+        """
+        psbt, seed, _, our_change_address, foreign_address = self.build_liana_style_psbt()
+
+        psbt_parser = PSBTParser(p=psbt, seed=seed, network=SettingsConstants.REGTEST)
+
+        assert psbt_parser.num_change_outputs == 1
+        assert psbt_parser.change_amount == 50_000
+        assert psbt_parser.change_data[0]["address"] == our_change_address
+
+        # The bug: this was 80_000 (change + payment) and 2 destinations.
+        assert psbt_parser.spend_amount == 30_000
+        assert psbt_parser.num_destinations == 1
+        assert psbt_parser.destination_addresses == [foreign_address]
+
+
+    def test_foreign_output_with_no_derivations_is_not_a_change_candidate(self):
+        """
+        The candidate fallback must not fire on an output that merely shares our
+        script type. Same PSBT as above: the foreign output carries neither a
+        witness_script nor any derivation, so nothing links it to this seed.
+        """
+        psbt, seed, _, _, foreign_address = self.build_liana_style_psbt()
+
+        psbt_parser = PSBTParser(p=psbt, seed=seed, network=SettingsConstants.REGTEST)
+
+        change_addresses = [c["address"] for c in psbt_parser.change_data]
+        assert foreign_address not in change_addresses
+        assert foreign_address in psbt_parser.destination_addresses
+
+
+    def test_our_derivation_on_foreign_script_is_candidate_but_fails_descriptor_check(self):
+        """
+        Security boundary. A coordinator can attach a genuine derivation of our own
+        pubkey to an output paying a script we do not control, which is enough to
+        pass the candidate check -- by design, since that check only proves our key
+        is referenced.
+
+        What must not happen is that passing the candidate check is mistaken for
+        ownership. verify_multisig_output(), against the known-good descriptor, has
+        to reject it, and requires_descriptor_verification has to be True so the
+        signing flow actually performs that check rather than falling back to
+        single-sig re-derivation.
+        """
+        psbt, seed, descriptor, _, _ = self.build_liana_style_psbt(
+            attach_our_derivation_to_foreign_output=True
+        )
+
+        psbt_parser = PSBTParser(p=psbt, seed=seed, network=SettingsConstants.REGTEST)
+
+        # Candidate check alone cannot tell these apart...
+        assert psbt_parser.num_change_outputs == 2
+
+        # ...so the descriptor must, and does.
+        verdicts = {
+            psbt_parser.get_change_data(n)["address"]: psbt_parser.verify_multisig_output(descriptor, change_num=n)
+            for n in range(psbt_parser.num_change_outputs)
+        }
+        assert sorted(verdicts.values()) == [False, True], verdicts
+
+        assert psbt_parser.requires_descriptor_verification is True
+
+
+    def test_requires_descriptor_verification_true_for_miniscript_policy(self):
+        """
+        A Miniscript wsh() policy has no m/n, so is_multisig is False and the
+        change-verification flow would have tried to re-derive the address from a
+        single key -- impossible for a wsh() script, and surfaced to the user as a
+        failed verification on a perfectly valid transaction.
+        """
+        psbt, seed, _, _, _ = self.build_liana_style_psbt()
+
+        psbt_parser = PSBTParser(p=psbt, seed=seed, network=SettingsConstants.REGTEST)
+
+        assert psbt_parser.is_multisig is False
+        assert psbt_parser.requires_descriptor_verification is True

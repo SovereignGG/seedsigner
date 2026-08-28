@@ -369,7 +369,7 @@ class PSBTChangeDetailsView(View):
         #     title += f" (#{self.change_address_num + 1})"
 
         is_change_addr_verified = False
-        if psbt_parser.is_multisig:
+        if psbt_parser.requires_descriptor_verification:
             # if the known-good multisig descriptor is already onboard:
             if self.controller.multisig_wallet_descriptor:
                 is_change_addr_verified = psbt_parser.verify_multisig_output(self.controller.multisig_wallet_descriptor, change_num=self.change_address_num)
@@ -428,8 +428,8 @@ class PSBTChangeDetailsView(View):
             finally:
                 loading_screen.stop()
 
-        if is_change_addr_verified == False and (not psbt_parser.is_multisig or self.controller.multisig_wallet_descriptor is not None):
-            return Destination(PSBTAddressVerificationFailedView, view_args=dict(is_change=is_change_derivation_path, is_multisig=psbt_parser.is_multisig), clear_history=True)
+        if is_change_addr_verified == False and (not psbt_parser.requires_descriptor_verification or self.controller.multisig_wallet_descriptor is not None):
+            return Destination(PSBTAddressVerificationFailedView, view_args=dict(is_change=is_change_derivation_path, is_multisig=psbt_parser.requires_descriptor_verification), clear_history=True)
 
         selected_menu_num = self.run_screen(
             PSBTChangeDetailsScreen,

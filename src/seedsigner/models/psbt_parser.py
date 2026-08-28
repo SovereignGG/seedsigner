@@ -164,6 +164,23 @@ class PSBTParser():
 
 
     @property
+    def requires_descriptor_verification(self):
+        """
+        Whether verifying this psbt's change addresses needs a known-good wallet
+        descriptor, as opposed to being derivable from the signing seed alone.
+
+        True for basic multisig (m/n present), and also for any wsh()/p2sh-p2wsh
+        policy where m/n is absent -- i.e. a Miniscript policy such as Liana's
+        inheritance wallets. In both cases the output's scriptpubkey commits to a
+        script this seed's key alone cannot reconstruct, so single-sig re-derivation
+        would not merely be inconvenient, it would be wrong: it can only ever fail,
+        and a failure here is surfaced to the user as a suspicious transaction.
+        The descriptor is the only thing that can actually answer the question.
+        """
+        return self.is_multisig or self.policy.get("type") in ("p2wsh", "p2sh-p2wsh")
+
+
+    @property
     def num_destinations(self):
         return len(self.destination_addresses)
 
@@ -353,6 +370,32 @@ class PSBTParser():
 
                 if sc.data == vout[i].script_pubkey.data:
                     is_change = True
+
+                # Nothing above could reconstruct the scriptpubkey. For a degraded
+                # policy (no m/n -- e.g. a Miniscript wsh() policy like Liana's)
+                # that is the normal case, not an anomaly: the witness script is
+                # not bare OP_CHECKMULTISIG, and coordinators do not populate
+                # witness_script on their own change outputs at all (verified
+                # against real Liana psbts, which supply only bip32_derivations).
+                # Falling through here would count our own change as money
+                # leaving the wallet, and would deny the user any on-device
+                # confirmation that it comes back to them.
+                #
+                # _verify_claimed_derivation_paths has already established, for
+                # every output, whether this seed genuinely derives a key that the
+                # output names -- re-derived and compared as real key material,
+                # not read off the claimed fingerprint. Reuse that result rather
+                # than repeating the derivation here.
+                #
+                # Note what it does and does not settle: our key is *referenced by*
+                # the output, not that the scriptpubkey encodes our wallet's
+                # policy. A coordinator can name a key we own on an output paying
+                # elsewhere. So this marks a change *candidate*, and
+                # verify_multisig_output() against a known-good descriptor is what
+                # confirms it -- which requires_descriptor_verification forces for
+                # every policy able to reach this branch.
+                if not is_change and sc.data == b"" and self.policy["type"] in ("p2wsh", "p2sh-p2wsh"):
+                    is_change = self.verified_output_derivation_paths[i] is not None
 
             if vout[i].script_pubkey.data[0] == OPCODES.OP_RETURN:
                 # The data is written as: OP_RETURN + OP_PUSHDATA1 + len(payload) + payload

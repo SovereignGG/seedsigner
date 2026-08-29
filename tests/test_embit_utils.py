@@ -516,19 +516,40 @@ def test_get_descriptor_policy_summary():
     )
     assert embit_utils.get_descriptor_policy_summary(basic_multisig) == "2 of 3 multisig"
 
-    # wsh() Miniscript: both spending paths must be mentioned, with the
-    # fingerprints and the timelock value visible
-    wsh_summary = embit_utils.get_descriptor_policy_summary(Descriptor.from_string(LIANA_WSH_DESCRIPTOR))
-    assert "73C5DA0A" in wsh_summary
-    assert "0BE174EE" in wsh_summary
-    assert "1000" in wsh_summary
-    assert "or" in wsh_summary
+    # Curated template (wsh and tr alike): must return the short fixed name,
+    # NOT a rendering of the policy expression.
+    #
+    # Regression test for a real bug found in on-device testing: Address
+    # Explorer's one-line "Wallet descriptor" field called this function and
+    # got back "(key BCE87290) or ((key 36D9CF93) and (after 4383 blocks))",
+    # which ran off the right edge of the screen mid-word. Wrapping it would
+    # not have been a fix -- the nested expression is the thing reviewers
+    # objected to showing at all (seedsigner#306, PR #1026). Asserting on the
+    # *absence* of expression syntax, not just on length, so a future change
+    # that merely shortens the expression still fails this.
+    for label, descriptor_str in [
+        ("wsh", LIANA_WSH_DESCRIPTOR),
+        ("tr", LIANA_TR_DESCRIPTOR),
+    ]:
+        summary = embit_utils.get_descriptor_policy_summary(Descriptor.from_string(descriptor_str))
+        assert summary == "Recovery wallet", f"{label}: {summary}"
+        assert "(" not in summary, f"{label}: policy expression leaked into summary"
+        assert "73C5DA0A" not in summary
+        assert "1000" not in summary
 
-    # Taproot regression test (the plan's explicit correctness requirement):
-    # a taproot descriptor with a hidden script-path recovery leaf must NEVER
-    # be summarized as plain single-key/single-signature. The key-path key and
-    # the recovery leaf's key + timelock must both show up.
-    tr_summary = embit_utils.get_descriptor_policy_summary(Descriptor.from_string(LIANA_TR_DESCRIPTOR))
+    # Taproot correctness requirement still holds for the taproot shapes that
+    # do NOT match the curated template and so fall through to the generic
+    # description: a hidden script-path recovery leaf must never be
+    # summarized as plain single-key/single-signature. Uses two leaves, which
+    # match_liana_recovery_policy() rejects (it requires exactly one).
+    from embit.descriptor.checksum import add_checksum
+    two_leaf_taproot = Descriptor.from_string(add_checksum(
+        "tr([73c5da0a/86h/1h/0h]tpubDFH9dgzveyD8zTbPUFuLrGmCydNvxehyNdUXKJAQN8x4aZ4j6UZqGfnqFrD4NqyaTVGKbvEW54tsvPTK2UoSbCC1PJY8iCNiwTL3RWZEheQ/<0;1>/*,"
+        "{and_v(v:pk([0be174ee/86h/1h/0h]tpubDEsePyLPkbxbrDiZSTTWdsviiNtiQjrvvzZnkLtG72QYLBygEsXePRsTdXi8DeMA7taCuuvoEBjUAfFrsNZeQJqfvG9fFoujYWbFPYUn7ux/<0;1>/*),older(1000)),"
+        "and_v(v:pk([0f889044/86h/1h/0h]tpubDFQDKbH2mDqNDPNaUVxM6R5mHhzC4u5F6mNnUkCf6gBMbcENMQ1ZGFLZc3QwgdEv2f34wkTvLMG5kD8AZEZRhat1HQDj42eVxQSxbcqxn31/<0;1>/*),older(2000))})"
+    ))
+    assert embit_utils.match_liana_recovery_policy(two_leaf_taproot) is None
+    tr_summary = embit_utils.get_descriptor_policy_summary(two_leaf_taproot)
     assert "single" not in tr_summary.lower()
     assert "73C5DA0A" in tr_summary  # key-path key
     assert "0BE174EE" in tr_summary  # hidden recovery leaf key
@@ -549,10 +570,18 @@ def test_get_descriptor_policy_summary():
     assert "73C5DA0A" in single_summary
 
     # 240x240-screen truncation: must never exceed max_length, and must end
-    # with a truncation marker rather than silently overflowing.
-    truncated = embit_utils.get_descriptor_policy_summary(Descriptor.from_string(LIANA_WSH_DESCRIPTOR), max_length=20)
+    # with a truncation marker rather than silently overflowing. Uses the
+    # two-leaf taproot above, since the curated template now returns a short
+    # fixed name that never needs truncating.
+    truncated = embit_utils.get_descriptor_policy_summary(two_leaf_taproot, max_length=20)
     assert len(truncated) <= 20
     assert truncated.endswith("…")
+
+    # The curated template's short name is well under any sane max_length, so
+    # it comes back whole rather than truncated.
+    assert embit_utils.get_descriptor_policy_summary(
+        Descriptor.from_string(LIANA_WSH_DESCRIPTOR), max_length=20
+    ) == "Recovery wallet"
 
 
 def test_can_derive_multisig_address():

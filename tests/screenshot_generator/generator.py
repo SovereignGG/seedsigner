@@ -487,6 +487,7 @@ def generate_screenshots(locale):
                 ScreenshotConfig(tools_views.ToolsCalcFinalWordDoneView),
                 ScreenshotConfig(tools_views.ToolsAddressExplorerSelectSourceView),
                 ScreenshotConfig(tools_views.ToolsAddressExplorerAddressTypeView, mock_context_manager=mock_multisig_wallet_descriptor_loaded),
+                ScreenshotConfig(tools_views.ToolsAddressExplorerAddressTypeView, mock_context_manager=mock_liana_recovery_wallet_descriptor_loaded, screenshot_name="ToolsAddressExplorerAddressTypeView_liana_recovery"),
                 ScreenshotConfig(tools_views.ToolsAddressExplorerAddressListView),
                 # ScreenshotConfig(tools_views.ToolsAddressExplorerAddressView),
             ],

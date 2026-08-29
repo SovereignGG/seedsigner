@@ -399,9 +399,21 @@ def match_liana_recovery_policy(descriptor: Descriptor):
 
 def get_descriptor_policy_summary(descriptor: Descriptor, max_length: int = 180) -> str:
     """
-    Plain-English summary of any descriptor's spending policy -- basic
-    multisig, general wsh() Miniscript, or taproot (key-path plus any hidden
-    script-path leaves).
+    Short plain-English summary of a descriptor's spending policy, for screens
+    that label a wallet in one line (e.g. Address Explorer's "Wallet
+    descriptor" field).
+
+    A descriptor matching the curated recovery template gets a fixed short
+    name rather than a rendering of its policy expression. That is the whole
+    point: a nested "(key A) or ((key B) and (after N blocks))" string does
+    not fit these one-line fields, and line-wrapping it would not help -- the
+    user would still have to parse parenthesization to understand it, which
+    is what makes it unsafe to show (seedsigner#306, PR #1026). Details of
+    the policy belong on the curated review screen
+    (LianaRecoveryWalletScreen), which presents them as labeled fields.
+
+    Handled here rather than at the call sites so that no current or future
+    caller can reintroduce the raw expression by accident.
 
     Correctness requirement: a taproot descriptor with a hidden script-path
     recovery leaf must never be summarized as plain single-key/single-signature.
@@ -411,6 +423,10 @@ def get_descriptor_policy_summary(descriptor: Descriptor, max_length: int = 180)
     unrecognized leaf fragment still shows up as raw text via
     `_describe_miniscript_node()`'s fallback, it's just never omitted).
     """
+    if match_liana_recovery_policy(descriptor) is not None:
+        # TRANSLATOR_NOTE: Short name for a wallet that can be spent now by one key, or by a recovery key after a timelock
+        return _("Recovery wallet")
+
     if descriptor.is_basic_multisig:
         threshold, n = get_multisig_policy(descriptor)
         # TRANSLATOR_NOTE: Multisig policy. For a "2 of 3" policy, "threshold" = 2; "n" = 3

@@ -418,6 +418,7 @@ def test_is_supported_wallet_descriptor():
     tests seedsigner.helpers.embit_utils.is_supported_wallet_descriptor()
     """
     from embit.descriptor import Descriptor
+    from embit.descriptor.checksum import add_checksum
 
     # Existing basic multisig (unchanged behavior)
     basic_multisig = Descriptor.from_string(
@@ -437,20 +438,35 @@ def test_is_supported_wallet_descriptor():
     )
     assert embit_utils.is_supported_wallet_descriptor(key_only_taproot) is True
 
-    # Arbitrary Miniscript that does NOT match the curated template must be
-    # rejected -- this is the entire point of narrowing the gate. Regression
-    # test for the exact concern raised in review (seedsigner#306, PR #1026):
-    # a generic AST-to-English summary was previously accepted for any wsh()
-    # Miniscript, which reviewers flagged as unreadable/unsafe on-device once
-    # policies get more complex than one OR of two simple branches.
-    complex_policy = Descriptor.from_string(
-        "wsh(or_d("
-        "multi(2,[8d55ff0d/48h/1h/0h/2h]tpubDDxNVWk924RTUhdkVB2uLHw1hGMPNMGufpZefhkkswjbZppVZcuMdjYKQN4ewUog9vbL6RBLFPRWcgTGT7kYP79N6thyJ43ELUs4N2szXMg/<0;1>/*,"
-        "[73c5da0a/48h/1h/0h/2h]tpubDFH9dgzveyD8zTbPUFuLrGmCydNvxehyNdUXKJAQN8x4aZ4j6UZqGfnqFrD4NqyaTVGKbvEW54tsvPTK2UoSbCC1PJY8iCNiwTL3RWZEheQ/<0;1>/*,"
-        "[0be174ee/48h/1h/0h/2h]tpubDEsePyLPkbxbrDiZSTTWdsviiNtiQjrvvzZnkLtG72QYLBygEsXePRsTdXi8DeMA7taCuuvoEBjUAfFrsNZeQJqfvG9fFoujYWbFPYUn7ux/<0;1>/*),"
-        "and_v(v:pkh([0f889044/48h/1h/0h/2h]tpubDFQDKbH2mDqNDPNaUVxM6R5mHhzC4u5F6mNnUkCf6gBMbcENMQ1ZGFLZc3QwgdEv2f34wkTvLMG5kD8AZEZRhat1HQDj42eVxQSxbcqxn31/<0;1>/*),older(25920))))"
-    )
-    assert embit_utils.is_supported_wallet_descriptor(complex_policy) is False
+    # Miniscript that does NOT match the curated template must be rejected --
+    # this is the point of narrowing the gate (seedsigner#306, PR #1026): a
+    # generic AST-to-English summary used to be accepted for any wsh()
+    # Miniscript, which reviewers flagged as unreadable/unsafe on-device.
+    #
+    # Both cases below are valid miniscript that this curated screen cannot
+    # state correctly, so both are refused rather than approximated.
+    key_a = "[8d55ff0d/48h/1h/0h/2h]tpubDDxNVWk924RTUhdkVB2uLHw1hGMPNMGufpZefhkkswjbZppVZcuMdjYKQN4ewUog9vbL6RBLFPRWcgTGT7kYP79N6thyJ43ELUs4N2szXMg/<0;1>/*"
+    key_b = "[73c5da0a/48h/1h/0h/2h]tpubDFH9dgzveyD8zTbPUFuLrGmCydNvxehyNdUXKJAQN8x4aZ4j6UZqGfnqFrD4NqyaTVGKbvEW54tsvPTK2UoSbCC1PJY8iCNiwTL3RWZEheQ/<0;1>/*"
+
+    # An *absolute* timelock (after = block height) where the template expects a
+    # *relative* one (older = blocks since the coin confirmed). Accepting this
+    # would be actively misleading, since the screen says "after N blocks",
+    # which describes the relative meaning.
+    absolute_timelock = Descriptor.from_string(add_checksum(
+        f"wsh(or_d(pk({key_a}),and_v(v:pkh({key_b}),after(500000))))"
+    ))
+    assert embit_utils.match_liana_recovery_policy(absolute_timelock) is None
+    assert embit_utils.is_supported_wallet_descriptor(absolute_timelock) is False
+
+    # A recovery path gated on a hash preimage in addition to a key and a
+    # timelock -- a third condition the curated two-path screen has nowhere to
+    # show, so silently omitting it would understate what's required to spend.
+    hashlock_recovery = Descriptor.from_string(add_checksum(
+        f"wsh(or_d(pk({key_a}),and_v(v:pkh({key_b}),"
+        "and_v(v:sha256(6c60f404f8167a38fc70eaf8aa17ac351023bef86bcb9d1086a19afe95bd5333),older(100)))))"
+    ))
+    assert embit_utils.match_liana_recovery_policy(hashlock_recovery) is None
+    assert embit_utils.is_supported_wallet_descriptor(hashlock_recovery) is False
 
     # Bare single-key descriptor: still excluded (unimplemented single-sig import)
     assert embit_utils.is_supported_wallet_descriptor(Descriptor.from_string(SINGLE_KEY_DESCRIPTOR)) is False
@@ -465,14 +481,18 @@ def test_match_liana_recovery_policy():
 
     wsh_match = embit_utils.match_liana_recovery_policy(Descriptor.from_string(LIANA_WSH_DESCRIPTOR))
     assert wsh_match is not None
-    assert wsh_match.primary_key.fingerprint.hex() == "73c5da0a"
-    assert wsh_match.recovery_key.fingerprint.hex() == "0be174ee"
+    assert wsh_match.primary_threshold == 1
+    assert wsh_match.primary_fingerprints == ["73c5da0a"]
+    assert wsh_match.recovery_threshold == 1
+    assert wsh_match.recovery_fingerprints == ["0be174ee"]
     assert wsh_match.timelock_blocks == 1000
 
     tr_match = embit_utils.match_liana_recovery_policy(Descriptor.from_string(LIANA_TR_DESCRIPTOR))
     assert tr_match is not None
-    assert tr_match.primary_key.fingerprint.hex() == "73c5da0a"
-    assert tr_match.recovery_key.fingerprint.hex() == "0be174ee"
+    assert tr_match.primary_threshold == 1
+    assert tr_match.primary_fingerprints == ["73c5da0a"]
+    assert tr_match.recovery_threshold == 1
+    assert tr_match.recovery_fingerprints == ["0be174ee"]
     assert tr_match.timelock_blocks == 1000
 
     # Basic multisig is a completely different shape -- no match, not an error
@@ -502,6 +522,95 @@ def test_match_liana_recovery_policy():
         "and_v(v:pkh([0be174ee/48h/1h/0h/2h]tpubDEsePyLPkbxbrDiZSTTWdsviiNtiQjrvvzZnkLtG72QYLBygEsXePRsTdXi8DeMA7taCuuvoEBjUAfFrsNZeQJqfvG9fFoujYWbFPYUn7ux/<0;1>/*),older(4195304))))"
     ))
     assert embit_utils.match_liana_recovery_policy(time_based) is None
+
+
+# Descriptors copied verbatim from Liana's own test suite
+# (liana-gui/src/app/state/receive.rs and .../psbt.rs), so these assert against
+# what Liana actually emits rather than against a hand-built approximation of
+# it. Note the two different multi-key forms Liana uses: `multi(k,...)` for a
+# quorum on the primary path, but `thresh(k,pkh(A),a:pkh(B))` for one on the
+# recovery path -- the recovery branch sits under and_v and needs different
+# miniscript type properties, so a matcher that only handled `multi()` would
+# silently reject every multi-key recovery wallet.
+LIANA_REAL_MULTISIG_PRIMARY = "wsh(or_d(multi(2,[ffd63c8d/48'/1'/0'/2']tpubDExA3EC3iAsPxPhFn4j6gMiVup6V2eH3qKyk69RcTc9TTNRfFYVPad8bJD5FCHVQxyBT4izKsvr7Btd2R4xmQ1hZkvsqGBaeE82J71uTK4N/<0;1>/*,[de6eb005/48'/1'/0'/2']tpubDFGuYfS2JwiUSEXiQuNGdT3R7WTDhbaE6jbUhgYSSdhmfQcSx7ZntMPPv7nrkvAqjpj3jX9wbhSGMeKVao4qAzhbNyBi7iQmv5xxQk6H6jz/<0;1>/*),and_v(v:pkh([ffd63c8d/48'/1'/0'/2']tpubDExA3EC3iAsPxPhFn4j6gMiVup6V2eH3qKyk69RcTc9TTNRfFYVPad8bJD5FCHVQxyBT4izKsvr7Btd2R4xmQ1hZkvsqGBaeE82J71uTK4N/<2;3>/*),older(3))))#p9ax3xxp"
+
+LIANA_REAL_MULTISIG_BOTH_PATHS = "wsh(or_d(multi(2,[f714c228/48'/1'/0'/2']tpubDEwJnTwfKoMvu8AXXBPydBVWDpzNP5tatjjZ56q4TQioGL7iL9xzTbMoCCQ3tfGihtff7vtR4xsjcRuhZ7HWARVAkGZ1HZcpBhVdou76k7j/<0;1>/*,[2522f23c/48'/1'/0'/2']tpubDEoTU4bDW1EXN1rnLXnRfue1a7DeqjJcs39PkEeLcVXhVKzCnFo9yQX2EeeXJ6kh4hgbz5o9v7YAc1EE97AEJpJbKNmDxE3ZQo4msGPSp2J/<0;1>/*),and_v(v:thresh(1,pkh([f714c228/48'/1'/0'/2']tpubDEwJnTwfKoMvu8AXXBPydBVWDpzNP5tatjjZ56q4TQioGL7iL9xzTbMoCCQ3tfGihtff7vtR4xsjcRuhZ7HWARVAkGZ1HZcpBhVdou76k7j/<2;3>/*),a:pkh([2522f23c/48'/1'/0'/2']tpubDEoTU4bDW1EXN1rnLXnRfue1a7DeqjJcs39PkEeLcVXhVKzCnFo9yQX2EeeXJ6kh4hgbz5o9v7YAc1EE97AEJpJbKNmDxE3ZQo4msGPSp2J/<2;3>/*)),older(65535))))#9s8ekrce"
+
+
+def test_match_liana_recovery_policy__multisig_paths():
+    """
+    A multi-key primary path with a timelocked recovery is Liana's flagship
+    configuration (2-of-3 now, single recovery key later), so it has to be a
+    first-class supported shape, not an edge case.
+    """
+    from embit.descriptor import Descriptor
+
+    m = embit_utils.match_liana_recovery_policy(Descriptor.from_string(LIANA_REAL_MULTISIG_PRIMARY))
+    assert m is not None
+    assert m.primary_threshold == 2
+    assert m.primary_fingerprints == ["ffd63c8d", "de6eb005"]
+    assert m.recovery_threshold == 1
+    assert m.recovery_fingerprints == ["ffd63c8d"]
+    assert m.timelock_blocks == 3
+
+    # thresh()-based recovery quorum, which is a different miniscript fragment
+    # from the multi() used on the primary path.
+    m = embit_utils.match_liana_recovery_policy(Descriptor.from_string(LIANA_REAL_MULTISIG_BOTH_PATHS))
+    assert m is not None
+    assert m.primary_threshold == 2
+    assert m.primary_fingerprints == ["f714c228", "2522f23c"]
+    assert m.recovery_threshold == 1
+    assert m.recovery_fingerprints == ["f714c228", "2522f23c"]
+    assert m.timelock_blocks == 65535
+
+    assert embit_utils.is_supported_wallet_descriptor(
+        Descriptor.from_string(LIANA_REAL_MULTISIG_PRIMARY)
+    ) is True
+
+
+def test_match_liana_recovery_policy__rejects_undisplayable_key_counts():
+    """
+    The curated screen renders fingerprints two per line with room for four
+    lines across both paths. A policy needing more than that is refused at
+    match time, because the alternative is a screen whose recovery section is
+    pushed under the buttons and silently invisible -- hiding the timelocked
+    path is strictly worse than declining to display the wallet.
+
+    Verified against the real screen: 3 primary lines + 1 recovery line ends
+    at 178px against a 200px button top; one more line reaches 199-201px.
+    """
+    from embit.descriptor import Descriptor
+    from embit.descriptor.checksum import add_checksum
+
+    xpubs = [
+        "tpubDDxNVWk924RTUhdkVB2uLHw1hGMPNMGufpZefhkkswjbZppVZcuMdjYKQN4ewUog9vbL6RBLFPRWcgTGT7kYP79N6thyJ43ELUs4N2szXMg",
+        "tpubDFH9dgzveyD8zTbPUFuLrGmCydNvxehyNdUXKJAQN8x4aZ4j6UZqGfnqFrD4NqyaTVGKbvEW54tsvPTK2UoSbCC1PJY8iCNiwTL3RWZEheQ",
+        "tpubDEsePyLPkbxbrDiZSTTWdsviiNtiQjrvvzZnkLtG72QYLBygEsXePRsTdXi8DeMA7taCuuvoEBjUAfFrsNZeQJqfvG9fFoujYWbFPYUn7ux",
+        "tpubDFQDKbH2mDqNDPNaUVxM6R5mHhzC4u5F6mNnUkCf6gBMbcENMQ1ZGFLZc3QwgdEv2f34wkTvLMG5kD8AZEZRhat1HQDj42eVxQSxbcqxn31",
+        "tpubDEx7eA5kryaQzKGqGw6G7McWQv3s1t2opk28vzCmS38Q7Zx31QWijPe24z3mjKwbkhh48FpUQYoiRAJcLXkmGbmiWJTErLFAcfDN53tEQVn",
+        "tpubDEejYZTUVV2p7Zxi8LKU1zH7oZXT9UaiWC3zbvZnNDQVkKCz7858R39j8mZn1vbBkwHDTzNRaC8hrjyM9u8MtsfTjYCJxx6XBHrhmPg4seG",
+        "tpubDF1SdybxnrvMab6MpzaSFvN26BtfANBSdAG1g1fHPYtaNo8oJaxnNfn2XgVuEvjaxoScVhNThEey27x9m3UB7GFfmYg6BA7yJ7EegKYb6EM",
+    ]
+
+    def key(i, branch="<0;1>"):
+        return f"[{'%08x' % (0x11111111 * (i + 1))}/48h/1h/0h/2h]{xpubs[i]}/{branch}/*"
+
+    def build(num_primary):
+        primary = f"multi(2,{','.join(key(i) for i in range(num_primary))})"
+        recovery = f"pkh({key(0, '<2;3>')})"
+        return Descriptor.from_string(
+            add_checksum(f"wsh(or_d({primary},and_v(v:{recovery},older(1000))))")
+        )
+
+    # 5 primary keys -> 3 lines + 1 recovery line = 4, the documented ceiling.
+    accepted = embit_utils.match_liana_recovery_policy(build(5))
+    assert accepted is not None
+    assert accepted.primary_threshold == 2
+    assert len(accepted.primary_fingerprints) == 5
+
+    # 7 primary keys -> 4 lines + 1 = 5, past the ceiling.
+    assert embit_utils.match_liana_recovery_policy(build(7)) is None
+    assert embit_utils.is_supported_wallet_descriptor(build(7)) is False
 
 
 def test_get_descriptor_policy_summary():

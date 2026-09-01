@@ -296,15 +296,38 @@ def _flatten_taptree_leaves(taptree: TapTree) -> list:
 
 class LianaRecoveryPolicy:
     """
-    Fields extracted from a descriptor matching the one curated Miniscript
-    shape this build supports. See `match_liana_recovery_policy()`.
-    """
-    __slots__ = ("primary_key", "recovery_key", "timelock_blocks")
+    Fields extracted from a descriptor matching the curated Miniscript shape
+    this build supports. See `match_liana_recovery_policy()`.
 
-    def __init__(self, primary_key, recovery_key, timelock_blocks: int):
-        self.primary_key = primary_key      # Key
-        self.recovery_key = recovery_key    # Key (tr) or KeyHash (wsh)
+    Both spending paths are represented uniformly as a threshold over a list
+    of keys, so a single key is simply 1-of-1. Callers that want to know
+    whether a path is single-key should test `len(keys) == 1` rather than
+    branching on a separate flag.
+    """
+    __slots__ = (
+        "primary_threshold", "primary_keys",
+        "recovery_threshold", "recovery_keys",
+        "timelock_blocks",
+    )
+
+    def __init__(self, primary_threshold: int, primary_keys: list,
+                 recovery_threshold: int, recovery_keys: list,
+                 timelock_blocks: int):
+        self.primary_threshold = primary_threshold
+        self.primary_keys = primary_keys        # list of Key
+        self.recovery_threshold = recovery_threshold
+        self.recovery_keys = recovery_keys      # list of Key / KeyHash
         self.timelock_blocks = timelock_blocks
+
+
+    @property
+    def primary_fingerprints(self) -> list:
+        return [k.fingerprint.hex() for k in self.primary_keys]
+
+
+    @property
+    def recovery_fingerprints(self) -> list:
+        return [k.fingerprint.hex() for k in self.recovery_keys]
 
 
 
@@ -318,17 +341,84 @@ def _unwrap(node):
 
 
 
+# Display-capacity limit for the curated policy screen, deliberately enforced
+# at match time so a policy this device cannot show in full is refused rather
+# than shown with half of it invisible.
+#
+# LianaRecoveryWalletScreen renders fingerprints two per line. Measured against
+# that screen at 240x240: 3 primary lines + 1 recovery line ends at 178px
+# against a button top of 200px, while one more line reaches 199-201px -- either
+# already clipped, or within a single pixel of it, leaving nothing for a longer
+# translated label. So four lines total across both paths is the honest ceiling.
+#
+# In practice this is not a real constraint on Liana wallets: it permits up to a
+# 5-key primary path alongside a 2-key recovery path (or 4 and 4), well beyond
+# the 2-of-3 and 3-of-5 setups that dominate actual use.
+MAX_POLICY_FINGERPRINT_LINES = 4
+_FINGERPRINTS_PER_LINE = 2
+
+
+
+def _match_key_group(node):
+    """
+    Match a spending path that is "k of these n keys", returning
+    (threshold, [keys]) or None.
+
+    Accepts the four shapes Liana emits, verified against descriptor vectors
+    in Liana's own test suite (liana-gui/src/app/state/{receive,psbt}.rs):
+
+      pk(K) / pkh(K)                      -> (1, [K])
+      multi(k, A, B, ...)                  -> (k, [A, B, ...])
+      thresh(k, pkh(A), a:pkh(B), ...)     -> (k, [A, B, ...])
+
+    Liana uses `multi()` for a multi-key primary path but `thresh()` with
+    `a:` wrappers for a multi-key recovery path (the recovery branch sits
+    under and_v and needs different miniscript type properties), so both have
+    to be handled rather than assuming one form.
+
+    Returns None for anything else -- including `thresh()` whose arguments are
+    not all plain single keys, since a nested condition inside one leg is
+    exactly the kind of structure this curated display cannot represent
+    honestly.
+    """
+    node = _unwrap(node)
+    name = getattr(node, "NAME", None)
+
+    if name in ("pk", "pkh"):
+        return (1, [node.arg])
+
+    if name in ("multi", "sortedmulti"):
+        return (node.args[0].num, list(node.args[1:]))
+
+    if name == "thresh":
+        keys = []
+        for leg in node.args[1:]:
+            leg = _unwrap(leg)
+            if getattr(leg, "NAME", None) not in ("pk", "pkh"):
+                return None
+            keys.append(leg.arg)
+        return (node.args[0].num, keys)
+
+    return None
+
+
+
 def match_liana_recovery_policy(descriptor: Descriptor):
     """
-    Recognizes exactly one Miniscript shape: spendable now by a primary key,
-    or by a recovery key after a relative (block-based) timelock -- Liana's
-    inheritance wallet policy, and the only Miniscript shape this build
-    displays with curated fields rather than generic policy text (see
-    `is_supported_wallet_descriptor()`).
+    Recognizes one curated Miniscript shape: spendable now by a primary key
+    or key-quorum, or by a recovery key or key-quorum after a relative
+    (block-based) timelock. This is Liana's inheritance wallet policy, and the
+    only Miniscript shape this build displays with curated fields rather than
+    generic policy text (see `is_supported_wallet_descriptor()`).
 
-        wsh():  or_d(pk(primary), and_v(v:pkh(recovery), older(N)))
+        wsh():  or_d(<primary>, and_v(v:<recovery>, older(N)))
         tr():   primary is the key-path (internal) key; the single hidden
-                script-path leaf is and_v(v:pk(recovery), older(N))
+                script-path leaf is and_v(v:<recovery>, older(N))
+
+    Either path may be a single key or a k-of-n quorum -- see
+    `_match_key_group()` for the accepted forms. A 2-of-3 primary with a
+    single-key timelocked recovery is Liana's most common real-world
+    configuration, so it is supported rather than treated as an edge case.
 
     Returns a `LianaRecoveryPolicy`, or `None` if the descriptor is anything
     else -- including this exact shape but with a BIP68 *time-based* (rather
@@ -348,9 +438,10 @@ def match_liana_recovery_policy(descriptor: Descriptor):
         leaves = _flatten_taptree_leaves(descriptor.taptree)
         if len(leaves) != 1:
             return None
-        primary_node = descriptor.key
-        if primary_node is None:
+        if descriptor.key is None:
             return None
+        # Taproot's key-path spend is inherently a single key.
+        primary_group = (1, [descriptor.key])
         recovery_branch = _unwrap(leaves[0].miniscript)
 
     elif descriptor.is_segwit and descriptor.miniscript is not None:
@@ -358,10 +449,9 @@ def match_liana_recovery_policy(descriptor: Descriptor):
         if getattr(top, "NAME", None) != "or_d":
             return None
 
-        pk_node = _unwrap(top.args[0])
-        if getattr(pk_node, "NAME", None) != "pk":
+        primary_group = _match_key_group(top.args[0])
+        if primary_group is None:
             return None
-        primary_node = pk_node.arg
 
         recovery_branch = _unwrap(top.args[1])
 
@@ -371,15 +461,11 @@ def match_liana_recovery_policy(descriptor: Descriptor):
     if getattr(recovery_branch, "NAME", None) != "and_v":
         return None
 
-    recovery_key_node = _unwrap(recovery_branch.args[0])
-    timelock_node = _unwrap(recovery_branch.args[1])
-
-    # tr()'s script-path leaf uses pk() (schnorr, no hash160 needed); wsh()
-    # uses pkh(). Both are accepted here; which one is structurally forced
-    # by which branch above ran, but re-checking costs nothing and keeps this
-    # function correct even if that assumption ever changes.
-    if getattr(recovery_key_node, "NAME", None) not in ("pk", "pkh"):
+    recovery_group = _match_key_group(recovery_branch.args[0])
+    if recovery_group is None:
         return None
+
+    timelock_node = _unwrap(recovery_branch.args[1])
     if getattr(timelock_node, "NAME", None) != "older":
         return None
 
@@ -389,9 +475,32 @@ def match_liana_recovery_policy(descriptor: Descriptor):
         return None
     timelock_blocks = raw & 0x0000FFFF
 
+    primary_threshold, primary_keys = primary_group
+    recovery_threshold, recovery_keys = recovery_group
+
+    # A threshold that cannot be satisfied, or one the display would describe
+    # incorrectly, means this isn't a shape we can present honestly.
+    if not 1 <= primary_threshold <= len(primary_keys):
+        return None
+    if not 1 <= recovery_threshold <= len(recovery_keys):
+        return None
+
+    # Too many keys to fit on the curated screen. Refusing here (which routes
+    # to NotYetImplementedView) is the safe outcome: the alternative is a
+    # screen whose recovery section is pushed under the buttons and silently
+    # invisible, hiding the timelocked path entirely -- strictly worse than
+    # declining to display the wallet at all.
+    def _lines(keys):
+        return -(-len(keys) // _FINGERPRINTS_PER_LINE)  # ceil division
+
+    if _lines(primary_keys) + _lines(recovery_keys) > MAX_POLICY_FINGERPRINT_LINES:
+        return None
+
     return LianaRecoveryPolicy(
-        primary_key=primary_node,
-        recovery_key=recovery_key_node.arg,
+        primary_threshold=primary_threshold,
+        primary_keys=primary_keys,
+        recovery_threshold=recovery_threshold,
+        recovery_keys=recovery_keys,
         timelock_blocks=timelock_blocks,
     )
 

@@ -122,6 +122,11 @@ MULTISIG_WALLET_DESCRIPTOR = """wsh(sortedmulti(1,[22bde1a9/48h/1h/0h/2h]tpubDFf
 # embit_utils.match_liana_recovery_policy).
 LIANA_RECOVERY_WALLET_DESCRIPTOR = """wsh(or_d(pk([73c5da0a/48h/1h/0h/2h]tpubDFH9dgzveyD8zTbPUFuLrGmCydNvxehyNdUXKJAQN8x4aZ4j6UZqGfnqFrD4NqyaTVGKbvEW54tsvPTK2UoSbCC1PJY8iCNiwTL3RWZEheQ/<0;1>/*),and_v(v:pkh([0be174ee/48h/1h/0h/2h]tpubDEsePyLPkbxbrDiZSTTWdsviiNtiQjrvvzZnkLtG72QYLBygEsXePRsTdXi8DeMA7taCuuvoEBjUAfFrsNZeQJqfvG9fFoujYWbFPYUn7ux/<0;1>/*),older(1000))))#73g7ls54"""
 
+# 2-of-3 primary path plus a single timelocked recovery key -- Liana's most
+# common real-world configuration, and the case that exercises the quorum
+# labels on LianaRecoveryWalletScreen.
+LIANA_MULTISIG_RECOVERY_WALLET_DESCRIPTOR = """wsh(or_d(multi(2,[8d55ff0d/48h/1h/0h/2h]tpubDDxNVWk924RTUhdkVB2uLHw1hGMPNMGufpZefhkkswjbZppVZcuMdjYKQN4ewUog9vbL6RBLFPRWcgTGT7kYP79N6thyJ43ELUs4N2szXMg/<0;1>/*,[73c5da0a/48h/1h/0h/2h]tpubDFH9dgzveyD8zTbPUFuLrGmCydNvxehyNdUXKJAQN8x4aZ4j6UZqGfnqFrD4NqyaTVGKbvEW54tsvPTK2UoSbCC1PJY8iCNiwTL3RWZEheQ/<0;1>/*,[0be174ee/48h/1h/0h/2h]tpubDEsePyLPkbxbrDiZSTTWdsviiNtiQjrvvzZnkLtG72QYLBygEsXePRsTdXi8DeMA7taCuuvoEBjUAfFrsNZeQJqfvG9fFoujYWbFPYUn7ux/<0;1>/*),and_v(v:pkh([0f889044/48h/1h/0h/2h]tpubDFQDKbH2mDqNDPNaUVxM6R5mHhzC4u5F6mNnUkCf6gBMbcENMQ1ZGFLZc3QwgdEv2f34wkTvLMG5kD8AZEZRhat1HQDj42eVxQSxbcqxn31/<2;3>/*),older(4383))))#qmk5utc6"""
+
 # Grab the most recent release version info for the "release build" splash screenshots.
 (latest_release_version_name, latest_release_version_timestamp) = VersionUtils._fetch_latest_seedsigner_release_tag()
 if not latest_release_version_name or not latest_release_version_timestamp:
@@ -304,6 +309,12 @@ def generate_screenshots(locale):
 
 
         @contextmanager
+        def mock_liana_multisig_recovery_wallet_descriptor_loaded():
+            with patch.object(controller, 'multisig_wallet_descriptor', embit.descriptor.Descriptor.from_string(LIANA_MULTISIG_RECOVERY_WALLET_DESCRIPTOR)):
+                yield
+
+
+        @contextmanager
         def mock_multisig_psbt_and_descriptor_loaded():
             with mock_multisig_psbt_loaded():
                 with mock_multisig_wallet_descriptor_loaded():
@@ -438,6 +449,7 @@ def generate_screenshots(locale):
                 ScreenshotConfig(seed_views.LoadMultisigWalletDescriptorView),
                 ScreenshotConfig(seed_views.MultisigWalletDescriptorView, mock_context_manager=mock_multisig_wallet_descriptor_loaded),
                 ScreenshotConfig(seed_views.MultisigWalletDescriptorView, mock_context_manager=mock_liana_recovery_wallet_descriptor_loaded, screenshot_name="MultisigWalletDescriptorView_liana_recovery"),
+                ScreenshotConfig(seed_views.MultisigWalletDescriptorView, mock_context_manager=mock_liana_multisig_recovery_wallet_descriptor_loaded, screenshot_name="MultisigWalletDescriptorView_liana_recovery_2of3"),
                 ScreenshotConfig(seed_views.SeedDiscardView, dict(seed=seed_12)),
 
                 ScreenshotConfig(seed_views.SeedSelectSeedView, dict(flow=Controller.FLOW__SIGN_MESSAGE), screenshot_name="SeedSelectSeedView_sign_message"),

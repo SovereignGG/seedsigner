@@ -2075,8 +2075,10 @@ class MultisigWalletDescriptorView(View):
         if recovery_policy is not None:
             selected_menu_num = self.run_screen(
                 seed_screens.LianaRecoveryWalletScreen,
-                primary_fingerprint=hexlify(recovery_policy.primary_key.fingerprint).decode(),
-                recovery_fingerprint=hexlify(recovery_policy.recovery_key.fingerprint).decode(),
+                primary_threshold=recovery_policy.primary_threshold,
+                primary_fingerprints=recovery_policy.primary_fingerprints,
+                recovery_threshold=recovery_policy.recovery_threshold,
+                recovery_fingerprints=recovery_policy.recovery_fingerprints,
                 timelock_blocks=recovery_policy.timelock_blocks,
                 button_data=button_data,
             )

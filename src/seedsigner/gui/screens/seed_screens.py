@@ -1608,20 +1608,27 @@ class MultisigWalletDescriptorScreen(ButtonListScreen):
 @dataclass
 class LianaRecoveryWalletScreen(ButtonListScreen):
     """
-    Curated review screen for the one Miniscript shape this build supports
-    (see embit_utils.match_liana_recovery_policy): spendable now by a primary
-    key, or by a recovery key after a relative timelock.
+    Curated review screen for the Miniscript shape this build supports (see
+    embit_utils.match_liana_recovery_policy): spendable now by a primary key
+    or key-quorum, or by a recovery key or key-quorum after a relative
+    timelock.
 
-    Deliberately two separate labeled fields rather than one line of policy
-    text. A generic "(key A) or ((key B) and (after N blocks))" summary
-    forces the user to mentally track parenthesization to know which
-    conditions actually apply together, which reviewers flagged as
-    unreadable and unsafe on this screen size (seedsigner#306, PR #1026).
-    Structured fields make the OR and the timelock explicit without any
-    expression to parse.
+    Deliberately separate labeled fields rather than one line of policy text.
+    A generic "(key A) or ((key B) and (after N blocks))" summary forces the
+    user to mentally track parenthesization to know which conditions actually
+    apply together, which reviewers flagged as unreadable and unsafe on this
+    screen size (seedsigner#306, PR #1026). Structured fields make the OR and
+    the timelock explicit without any expression to parse.
+
+    Each path's threshold is folded into its label ("Spend now, 2 of 3")
+    rather than shown as a separate field, so a quorum wallet costs no extra
+    vertical space beyond the additional fingerprints themselves. A 1-of-1
+    path omits the threshold entirely, since "1 of 1" is noise.
     """
-    primary_fingerprint: str = None
-    recovery_fingerprint: str = None
+    primary_threshold: int = None
+    primary_fingerprints: List[str] = None
+    recovery_threshold: int = None
+    recovery_fingerprints: List[str] = None
     timelock_blocks: int = None
 
     def __post_init__(self):
@@ -1629,10 +1636,29 @@ class LianaRecoveryWalletScreen(ButtonListScreen):
         self.is_bottom_list = True
         super().__post_init__()
 
+        if len(self.primary_fingerprints) > 1:
+            # TRANSLATOR_NOTE: Label for the keys that can spend immediately; {k} of {n} keys required
+            primary_label = _("Spend now, {k} of {n}").format(
+                k=self.primary_threshold, n=len(self.primary_fingerprints)
+            )
+        else:
+            # TRANSLATOR_NOTE: Label for the single key that can spend immediately, with no waiting period
+            primary_label = _("Spend now with")
+
+        if len(self.recovery_fingerprints) > 1:
+            # TRANSLATOR_NOTE: Recovery keys label; {n} blocks must pass, then {k} of {total} keys are required
+            recovery_label = _("OR after {n} blocks, {k} of {total}").format(
+                n=self.timelock_blocks,
+                k=self.recovery_threshold,
+                total=len(self.recovery_fingerprints),
+            )
+        else:
+            # TRANSLATOR_NOTE: Label for the recovery key; {n} is the number of blocks that must pass first
+            recovery_label = _("OR after {n} blocks with").format(n=self.timelock_blocks)
+
         self.components.append(IconTextLine(
-            # TRANSLATOR_NOTE: Label for the key that can spend immediately, with no waiting period
-            label_text=_("Spend now with"),
-            value_text=self.primary_fingerprint,
+            label_text=primary_label,
+            value_text=" ".join(self.primary_fingerprints),
             font_size=24,
             font_name=GUIConstants.FIXED_WIDTH_EMPHASIS_FONT_NAME,
             screen_y=self.top_nav.height,
@@ -1641,9 +1667,8 @@ class LianaRecoveryWalletScreen(ButtonListScreen):
         ))
 
         self.components.append(IconTextLine(
-            # TRANSLATOR_NOTE: Label for the recovery key; {n} is the number of blocks that must pass first
-            label_text=_("OR after {n} blocks with").format(n=self.timelock_blocks),
-            value_text=self.recovery_fingerprint,
+            label_text=recovery_label,
+            value_text=" ".join(self.recovery_fingerprints),
             font_size=24,
             font_name=GUIConstants.FIXED_WIDTH_EMPHASIS_FONT_NAME,
             screen_y=self.components[-1].screen_y + self.components[-1].height + 2*GUIConstants.COMPONENT_PADDING,

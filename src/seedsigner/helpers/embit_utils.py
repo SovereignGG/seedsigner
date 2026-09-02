@@ -359,22 +359,59 @@ _FINGERPRINTS_PER_LINE = 2
 
 
 
+def _flatten_and_v_keys(node):
+    """
+    Flatten a chain of `and_v` whose leaves are all plain keys into that list
+    of keys, or return None if any leaf is something else.
+
+    An n-of-n path compiles to nested and_v rather than multi(n,...) because
+    chaining is cheaper in script bytes, so
+    `and_v(v:and_v(v:pk(A),pk(B)),pk(C))` is how "all three of A, B and C must
+    sign" actually arrives. Confirmed against a real Liana 3-of-3 export.
+
+    Only and_v nodes and key leaves are accepted. A timelock, hash preimage or
+    any other condition inside the chain means this is not a pure key quorum,
+    and the caller must not describe it as one.
+    """
+    node = _unwrap(node)
+    name = getattr(node, "NAME", None)
+
+    if name in ("pk", "pkh"):
+        return [node.arg]
+
+    if name == "and_v":
+        keys = []
+        for arg in node.args:
+            sub = _flatten_and_v_keys(arg)
+            if sub is None:
+                return None
+            keys.extend(sub)
+        return keys
+
+    return None
+
+
+
 def _match_key_group(node):
     """
     Match a spending path that is "k of these n keys", returning
     (threshold, [keys]) or None.
 
-    Accepts the four shapes Liana emits, verified against descriptor vectors
-    in Liana's own test suite (liana-gui/src/app/state/{receive,psbt}.rs):
+    Accepts the shapes Liana emits, verified against descriptor vectors in
+    Liana's own test suite (liana-gui/src/app/state/{receive,psbt}.rs) plus a
+    real 3-of-3 export from the GUI:
 
-      pk(K) / pkh(K)                      -> (1, [K])
+      pk(K) / pkh(K)                       -> (1, [K])
       multi(k, A, B, ...)                  -> (k, [A, B, ...])
       thresh(k, pkh(A), a:pkh(B), ...)     -> (k, [A, B, ...])
+      and_v(v:and_v(v:pk(A),pk(B)),pk(C))  -> (3, [A, B, C])   (n-of-n)
 
     Liana uses `multi()` for a multi-key primary path but `thresh()` with
     `a:` wrappers for a multi-key recovery path (the recovery branch sits
     under and_v and needs different miniscript type properties), so both have
-    to be handled rather than assuming one form.
+    to be handled rather than assuming one form. An n-of-n path is different
+    again: it compiles to a nested and_v chain, since that is cheaper than
+    multi(n,...) when every key is required.
 
     Returns None for anything else -- including `thresh()` whose arguments are
     not all plain single keys, since a nested condition inside one leg is
@@ -399,23 +436,77 @@ def _match_key_group(node):
             keys.append(leg.arg)
         return (node.args[0].num, keys)
 
+    if name == "and_v":
+        # n-of-n: every key in the chain is required, so threshold == count.
+        keys = _flatten_and_v_keys(node)
+        if keys is None or len(keys) < 2:
+            return None
+        return (len(keys), keys)
+
+    return None
+
+
+
+def _match_timelocked_branch(node):
+    """
+    Match `and_v(v:<key group>, older(N))` -- a spending path gated behind a
+    relative, block-based timelock. Returns ((threshold, keys), blocks), or
+    None if this isn't that shape.
+
+    The timelock is located by inspecting both arguments rather than assuming
+    which side it sits on, and the other argument must be a pure key group.
+    That last requirement is what rejects a multi-tier recovery policy: in
+    `or_i(and_v(v:pkh(A),older(N)), and_v(v:pkh(B),older(M)))` each branch
+    looks timelocked, but treating one as the "primary" path would require
+    describing a timelocked branch as spendable now, so no match is returned.
+    """
+    node = _unwrap(node)
+    if getattr(node, "NAME", None) != "and_v" or len(node.args) != 2:
+        return None
+
+    for key_side, lock_side in ((node.args[0], node.args[1]),
+                                (node.args[1], node.args[0])):
+        lock = _unwrap(lock_side)
+        if getattr(lock, "NAME", None) != "older":
+            continue
+
+        raw = lock.arg.num
+        if raw & 0x00400000:
+            # BIP68 type-flag bit set: time-based (512-second units), not blocks.
+            return None
+
+        group = _match_key_group(key_side)
+        if group is None:
+            return None
+
+        return (group, raw & 0x0000FFFF)
+
     return None
 
 
 
 def match_liana_recovery_policy(descriptor: Descriptor):
     """
-    Recognizes one curated Miniscript shape: spendable now by a primary key
-    or key-quorum, or by a recovery key or key-quorum after a relative
+    Recognizes one curated Miniscript shape: spendable now by a key or
+    key-quorum, or by a recovery key or key-quorum after a relative
     (block-based) timelock. This is Liana's inheritance wallet policy, and the
     only Miniscript shape this build displays with curated fields rather than
     generic policy text (see `is_supported_wallet_descriptor()`).
 
         wsh():  or_d(<primary>, and_v(v:<recovery>, older(N)))
+                or_i(and_v(v:<recovery>, older(N)), <primary>)
         tr():   primary is the key-path (internal) key; the single hidden
                 script-path leaf is and_v(v:<recovery>, older(N))
 
-    Either path may be a single key or a k-of-n quorum -- see
+    Both `or_d` and `or_i` appear because the miniscript compiler's choice
+    depends on the primary path. `or_d(X,Z)` requires X to be dissatisfiable,
+    which an n-of-n `and_v` chain is not, so an all-keys-required primary
+    compiles to `or_i` instead -- and with the branches in the opposite order.
+    Confirmed against a real Liana 3-of-3 export. Rather than encode that as
+    two positional cases, the branch carrying the timelock is identified by
+    inspection and the other is taken as the primary.
+
+    Either path may be a single key, a k-of-n quorum, or an n-of-n; see
     `_match_key_group()` for the accepted forms. A 2-of-3 primary with a
     single-key timelocked recovery is Liana's most common real-world
     configuration, so it is supported rather than treated as an edge case.
@@ -442,38 +533,35 @@ def match_liana_recovery_policy(descriptor: Descriptor):
             return None
         # Taproot's key-path spend is inherently a single key.
         primary_group = (1, [descriptor.key])
-        recovery_branch = _unwrap(leaves[0].miniscript)
+        recovery = _match_timelocked_branch(leaves[0].miniscript)
+        if recovery is None:
+            return None
+        recovery_group, timelock_blocks = recovery
 
     elif descriptor.is_segwit and descriptor.miniscript is not None:
         top = _unwrap(descriptor.miniscript)
-        if getattr(top, "NAME", None) != "or_d":
+        if getattr(top, "NAME", None) not in ("or_d", "or_i"):
+            return None
+        if len(top.args) != 2:
             return None
 
-        primary_group = _match_key_group(top.args[0])
-        if primary_group is None:
+        # Which branch is which depends on the operator, so identify the
+        # timelocked one instead of assuming a position.
+        for primary_node, recovery_node in ((top.args[0], top.args[1]),
+                                            (top.args[1], top.args[0])):
+            recovery = _match_timelocked_branch(recovery_node)
+            if recovery is None:
+                continue
+            primary_group = _match_key_group(primary_node)
+            if primary_group is None:
+                continue
+            recovery_group, timelock_blocks = recovery
+            break
+        else:
             return None
-
-        recovery_branch = _unwrap(top.args[1])
 
     else:
         return None
-
-    if getattr(recovery_branch, "NAME", None) != "and_v":
-        return None
-
-    recovery_group = _match_key_group(recovery_branch.args[0])
-    if recovery_group is None:
-        return None
-
-    timelock_node = _unwrap(recovery_branch.args[1])
-    if getattr(timelock_node, "NAME", None) != "older":
-        return None
-
-    raw = timelock_node.arg.num
-    if raw & 0x00400000:
-        # BIP68 type-flag bit set: time-based (512-second units), not blocks.
-        return None
-    timelock_blocks = raw & 0x0000FFFF
 
     primary_threshold, primary_keys = primary_group
     recovery_threshold, recovery_keys = recovery_group

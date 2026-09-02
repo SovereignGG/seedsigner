@@ -568,6 +568,66 @@ def test_match_liana_recovery_policy__multisig_paths():
     ) is True
 
 
+# A real Liana export (signet), captured from the GUI during hardware testing:
+# an n-of-n primary path plus a single timelocked recovery key. Note that the
+# recovery key is also one of the three primary keys, on a different derivation
+# branch -- legal, and something the display must not obscure.
+#
+# Liana compiles this differently from a k-of-n primary, which is why it needed
+# separate handling: `or_d(X,Z)` requires X to be dissatisfiable, an `and_v`
+# chain is not, so an all-keys-required primary compiles to `or_i` instead --
+# with the recovery branch FIRST, the reverse of the or_d form.
+LIANA_REAL_3OF3_OR_I = "wsh(or_i(and_v(v:pkh([bce87290/48'/1'/0'/2']tpubDEx7eA5kryaQzKGqGw6G7McWQv3s1t2opk28vzCmS38Q7Zx31QWijPe24z3mjKwbkhh48FpUQYoiRAJcLXkmGbmiWJTErLFAcfDN53tEQVn/<2;3>/*),older(26298)),and_v(v:and_v(v:pk([bce87290/48'/1'/0'/2']tpubDEx7eA5kryaQzKGqGw6G7McWQv3s1t2opk28vzCmS38Q7Zx31QWijPe24z3mjKwbkhh48FpUQYoiRAJcLXkmGbmiWJTErLFAcfDN53tEQVn/<0;1>/*),pk([0f21a47d/48'/1'/0'/2']tpubDFLufBxpBavKArzSHoaXPG7WB6ruswscnzFiuHQ1T3AQDTmSN2ZSe3EN7U82q86hQWjZMiL3hio99SafdwgESZ4uD4cebmNqu6VtdNgTLQV/<0;1>/*)),pk([65645849/48'/1'/0'/2']tpubDEctyheVBNxchsg3rV5zAWgTaYkw8VL6SnJJacaWLqyAX2L8zxzQCqHTNzx3RnuZy2SgeCGUPx56WyJjusbe73pgT9GDZPYTet13Gv4nsPo/<0;1>/*))))#5rvc9c67"
+
+
+def test_match_liana_recovery_policy__n_of_n_primary_via_or_i():
+    """
+    An n-of-n primary path arrives structurally different from a k-of-n one:
+    `or_i` instead of `or_d`, branches in the opposite order, and the keys
+    chained through nested `and_v` rather than listed in `multi()`. This
+    descriptor is a real Liana export that the earlier or_d-only matcher
+    refused, showing up on hardware as "Not Yet Implemented".
+
+    The threshold must come out as 3 of 3, not 2 of 3: an and_v chain requires
+    every key, and understating that on a signing device would tell the user
+    their wallet is more recoverable than it is.
+    """
+    from embit.descriptor import Descriptor
+
+    d = Descriptor.from_string(LIANA_REAL_3OF3_OR_I)
+    m = embit_utils.match_liana_recovery_policy(d)
+    assert m is not None
+
+    assert m.primary_threshold == 3
+    assert m.primary_fingerprints == ["bce87290", "0f21a47d", "65645849"]
+    assert m.recovery_threshold == 1
+    assert m.recovery_fingerprints == ["bce87290"]
+    assert m.timelock_blocks == 26298
+
+    assert embit_utils.is_supported_wallet_descriptor(d) is True
+
+
+def test_match_liana_recovery_policy__rejects_multiple_recovery_tiers():
+    """
+    Liana can define several recovery paths with different timelocks. Both
+    branches of the resulting or_i are timelocked, so neither is spendable
+    now -- describing either as the "Spend now" path would be false, and the
+    curated screen has only two fields regardless. Refused rather than
+    approximated.
+    """
+    from embit.descriptor import Descriptor
+    from embit.descriptor.checksum import add_checksum
+
+    key_b = "[73c5da0a/48h/1h/0h/2h]tpubDFH9dgzveyD8zTbPUFuLrGmCydNvxehyNdUXKJAQN8x4aZ4j6UZqGfnqFrD4NqyaTVGKbvEW54tsvPTK2UoSbCC1PJY8iCNiwTL3RWZEheQ/<0;1>/*"
+    key_c = "[0be174ee/48h/1h/0h/2h]tpubDEsePyLPkbxbrDiZSTTWdsviiNtiQjrvvzZnkLtG72QYLBygEsXePRsTdXi8DeMA7taCuuvoEBjUAfFrsNZeQJqfvG9fFoujYWbFPYUn7ux/<0;1>/*"
+
+    two_tier = Descriptor.from_string(add_checksum(
+        f"wsh(or_i(and_v(v:pkh({key_b}),older(1000)),and_v(v:pkh({key_c}),older(2000))))"
+    ))
+    assert embit_utils.match_liana_recovery_policy(two_tier) is None
+    assert embit_utils.is_supported_wallet_descriptor(two_tier) is False
+
+
 def test_match_liana_recovery_policy__rejects_undisplayable_key_counts():
     """
     The curated screen renders fingerprints two per line with room for four

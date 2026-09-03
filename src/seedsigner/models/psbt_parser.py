@@ -476,12 +476,18 @@ class PSBTParser():
         the existing partial_sigs entry for the same pubkey, so the count is
         identical in both cases.
 
-        Re-derives each candidate key from `root` and compares the serialized
-        pubkey rather than trusting the psbt's claimed fingerprints, which are
-        32 bits and coordinator-supplied. This only decides which message the
-        user sees, so a wrong answer would be cosmetic rather than dangerous --
-        but deriving properly costs little and keeps the claimed-vs-verified
-        split this class documents intact.
+        Ownership goes through seed_owns_pubkey() rather than the psbt's claimed
+        fingerprints, which are 32 bits and coordinator-supplied. This only
+        decides which message the user sees, so a wrong answer would be cosmetic
+        rather than dangerous, but there is no reason to establish ownership any
+        way other than the canonical one.
+
+        Note this stays reachable even though _reject_if_seed_cannot_sign() now
+        turns away a seed that owns nothing: that check guarantees the seed can
+        sign *some* input, which is not the same as the signing pass having added
+        a signature. Inferring "already signed" from the absence of a rejection
+        would be a chain of assumptions about embit's behavior; asking directly
+        costs one derivation.
         """
         for inp in tx.inputs:
             if not inp.partial_sigs:
@@ -492,13 +498,18 @@ class PSBTParser():
                     continue
 
                 try:
-                    derived_key = root.derive(derivation_path.derivation)
+                    if PSBTParser.seed_owns_pubkey(
+                        root=root,
+                        claimed_derivation_path=derivation_path.derivation,
+                        public_key=public_key,
+                        child_key_derivation_cache=None,
+                    ):
+                        return True
                 except Exception as e:
-                    logger.debug("Signed-by-this-seed derivation failed: %s", e, exc_info=True)
+                    # A coordinator-supplied path can be nonsense; that means this
+                    # entry tells us nothing, not that the check should fail.
+                    logger.debug("Signed-by-this-seed check failed: %s", e, exc_info=True)
                     continue
-
-                if derived_key.key.sec() == public_key.sec():
-                    return True
 
         return False
 

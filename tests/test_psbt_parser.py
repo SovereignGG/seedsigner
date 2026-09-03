@@ -1534,3 +1534,47 @@ class TestPSBTParserMiniscript:
 
         assert psbt_parser.is_multisig is False
         assert psbt_parser.requires_descriptor_verification is True
+
+
+    def test_has_signature_from_seed_distinguishes_already_signed_from_cannot_sign(self):
+        """
+        sig_count() cannot tell "this seed already signed" apart from "this seed
+        cannot sign this psbt": partial_sigs is keyed by pubkey, so re-signing
+        overwrites the existing entry and the count is unchanged either way.
+        The signing flow reported both as "Signing Failed".
+
+        Observed on hardware with a 3-of-3 Liana wallet: a psbt exported after
+        one key had already signed, then offered to that same seed again, told
+        the user signing had failed when the transaction was in fact validly
+        signed by it. Much more reachable on n-of-n and multisig wallets, where
+        the same psbt is signed repeatedly with different seeds.
+        """
+        net = NETWORKS["regtest"]
+        psbt, seed, _, _ = self.build_miniscript_psbt()
+
+        root = bip32.HDKey.from_seed(seed.seed_bytes, version=net["xprv"])
+        inp = psbt.inputs[0]
+
+        # Nothing signed yet: this seed has no signature on the psbt.
+        assert PSBTParser.has_signature_from_seed(psbt, root) is False
+
+        # A signature for a key that really does derive from this seed. Reuses
+        # the psbt's own pubkey object, since partial_sigs and bip32_derivations
+        # must be keyed consistently for the lookup to find it.
+        our_pubkey, our_derivation = list(inp.bip32_derivations.items())[0]
+        assert root.derive(our_derivation.derivation).key.sec() == our_pubkey.sec(), \
+            "fixture sanity: this derivation should belong to the signing seed"
+        inp.partial_sigs[our_pubkey] = b"\x30" * 71
+        assert PSBTParser.has_signature_from_seed(psbt, root) is True
+
+        # A different seed must not be told it already signed, even though the
+        # psbt's claimed fingerprints are unchanged -- the check re-derives and
+        # compares real key material rather than trusting those 32-bit claims.
+        other_root = bip32.HDKey.from_seed(
+            bip39.mnemonic_to_seed(self.MNEMONIC_FOREIGN), version=net["xprv"]
+        )
+        assert PSBTParser.has_signature_from_seed(psbt, other_root) is False
+
+        # sig_count() gives the same answer in both cases, which is exactly why
+        # it could not drive this distinction on its own.
+        assert PSBTParser.sig_count(psbt) == 1

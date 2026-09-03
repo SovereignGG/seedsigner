@@ -466,6 +466,44 @@ class PSBTParser():
 
 
     @staticmethod
+    def has_signature_from_seed(tx, root: bip32.HDKey) -> bool:
+        """
+        Whether any input already carries a signature for a pubkey that
+        provably derives from `root`.
+
+        Used to tell "this seed already signed" apart from "this seed cannot
+        sign this psbt", which sig_count() alone cannot: re-signing overwrites
+        the existing partial_sigs entry for the same pubkey, so the count is
+        identical in both cases.
+
+        Re-derives each candidate key from `root` and compares the serialized
+        pubkey rather than trusting the psbt's claimed fingerprints, which are
+        32 bits and coordinator-supplied. This only decides which message the
+        user sees, so a wrong answer would be cosmetic rather than dangerous --
+        but deriving properly costs little and keeps the claimed-vs-verified
+        split this class documents intact.
+        """
+        for inp in tx.inputs:
+            if not inp.partial_sigs:
+                continue
+
+            for public_key, derivation_path in inp.bip32_derivations.items():
+                if public_key not in inp.partial_sigs:
+                    continue
+
+                try:
+                    derived_key = root.derive(derivation_path.derivation)
+                except Exception as e:
+                    logger.debug("Signed-by-this-seed derivation failed: %s", e, exc_info=True)
+                    continue
+
+                if derived_key.key.sec() == public_key.sec():
+                    return True
+
+        return False
+
+
+    @staticmethod
     def _get_policy(scope, scriptpubkey, xpubs, child_key_derivation_cache: dict | None):
         """Parse scope and get policy"""
         # we don't know the policy yet, let's parse it

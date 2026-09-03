@@ -531,6 +531,7 @@ def generate_screenshots(locale):
                 ScreenshotConfig(CameraConnectionErrorView),
                 ScreenshotConfig(NetworkMismatchErrorView, dict(derivation_path="m/84'/1'/0'")),
                 ScreenshotConfig(OptionDisabledView,       dict(settings_attr=SettingsConstants.SETTING__MESSAGE_SIGNING)),
+                ScreenshotConfig(OptionDisabledView,       dict(settings_attr=SettingsConstants.SETTING__MINISCRIPT), screenshot_name="OptionDisabledView_miniscript"),
                 ScreenshotConfig(scan_views.ScanInvalidQRTypeView)
             ]
         }
